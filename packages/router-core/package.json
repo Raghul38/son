@@ -1,0 +1,14 @@
+{
+  "name": "@xrppay/router-core",
+  "version": "0.1.0",
+  "description": "Pure, deterministic model routing for XRP-Pay Router - no network or payment code.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "jest --config jest.config.js"
+  }
+}
