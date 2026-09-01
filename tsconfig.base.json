@@ -12,6 +12,7 @@
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
+    "isolatedModules": true,
     "types": ["node"]
   }
 }

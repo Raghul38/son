@@ -8,7 +8,7 @@
   ],
   "scripts": {
     "build": "npm run build -w @xrppay/router-core && npm run build -w @xrppay/server",
-    "test": "npm run test --workspaces --if-present"
+    "test": "npm run build && npm run test --workspaces --if-present"
   },
   "engines": {
     "node": ">=22"
