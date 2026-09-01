@@ -1,0 +1,20 @@
+{
+  "name": "@xrppay/server",
+  "version": "0.1.0",
+  "description": "Express + TypeScript payment-gated AI gateway server for XRP-Pay Router. Serves POST /v1/chat behind x402 payment middleware.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "jest --config jest.config.js"
+  },
+  "dependencies": {
+    "@xrppay/router-core": "0.1.0",
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/supertest": "^6.0.2",
+    "supertest": "^7.0.0"
+  }
+}

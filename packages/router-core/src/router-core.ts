@@ -84,10 +84,10 @@ export function routeRequest(
   return { model: best, costPer1MTokens: best.costPer1MTokens };
 }
 
-export { Capability, ModelSpec, ModelId } from './models';
+export type { Capability, ModelSpec, ModelId } from './models';
 export {
   RouterError,
   UnknownCapabilityError,
   NoRouteError,
-  NoRouteReason,
 } from './errors';
+export type { NoRouteReason } from './errors';
