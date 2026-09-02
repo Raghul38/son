@@ -19,6 +19,8 @@ export interface ModelCallResult {
   content: string;
   /** Model id that produced the reply. */
   modelId: string;
+  /** Always true — lets the chat handler flag stub responses as placeholders. */
+  stub: true;
 }
 
 export async function callModel(input: ModelCallInput): Promise<ModelCallResult> {
@@ -26,6 +28,7 @@ export async function callModel(input: ModelCallInput): Promise<ModelCallResult>
   // input.modelId. Do NOT hardcode keys or provider URLs here.
   return {
     modelId: input.modelId,
+    stub: true,
     content: `[stub] ${input.modelId} replied to ${input.messages.length} message(s). Real LLM call pending.`,
   };
 }

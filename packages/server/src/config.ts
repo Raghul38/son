@@ -33,6 +33,15 @@ export interface ServerConfig {
   publicUrl: string;
   /** Request logging level. Default "info". */
   logLevel: 'debug' | 'info' | 'warn' | 'error';
+  /**
+   * DeepSeek API key (LLM_API_KEY). When empty, routed "deepseek" requests
+   * fall back to the model stub so local dev needs zero configuration.
+   */
+  llmApiKey: string;
+  /** DeepSeek (OpenAI-compatible) API base URL. Default: https://api.deepseek.com */
+  llmBaseUrl: string;
+  /** Hard deadline for one LLM provider call, in milliseconds. Default 30000. */
+  llmTimeoutMs: number;
 }
 
 function env(name: string): string | undefined {
@@ -54,6 +63,14 @@ function parsePort(value: string | undefined, fallback: number): number {
   if (value === undefined || value === '') return fallback;
   const n = Number.parseInt(value, 10);
   if (Number.isNaN(n) || n <= 0 || n > 65535) return fallback;
+  return n;
+}
+
+/** Parse a positive integer env value, falling back when absent/invalid. */
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+  if (value === undefined || value === '') return fallback;
+  const n = Number.parseInt(value, 10);
+  if (Number.isNaN(n) || n <= 0) return fallback;
   return n;
 }
 
@@ -80,6 +97,9 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     rewardDrops: requireEnv('PAYMENT_REWARD_DROPS', '1000000'),
     publicUrl: env('PUBLIC_URL') ?? '',
     logLevel: parseLogLevel(env('LOG_LEVEL')),
+    llmApiKey: env('LLM_API_KEY') ?? '',
+    llmBaseUrl: env('LLM_BASE_URL') ?? 'https://api.deepseek.com',
+    llmTimeoutMs: parsePositiveInt(env('LLM_TIMEOUT_MS'), 30000),
   };
   return { ...config, ...overrides };
 }

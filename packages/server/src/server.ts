@@ -38,7 +38,7 @@ export function createApp(deps: AppDeps): Express {
   app.post(
     '/v1/chat',
     x402PaymentMiddleware(deps.facilitator, deps.config, log),
-    createChatHandler(log)
+    createChatHandler(deps.config, log)
   );
 
   // 404 for unknown routes.
