@@ -8,6 +8,7 @@ import { loadConfig, ServerConfig } from './config';
 import { Logger } from './logger';
 import { Facilitator } from './facilitator/facilitator';
 import { MockFacilitator } from './facilitator/mock-facilitator';
+import { QuickNodeFacilitator } from './facilitator/quicknode-facilitator';
 
 export { createApp } from './server';
 export * from './config';
@@ -15,20 +16,36 @@ export * from './logger';
 export * from './x402';
 export * from './facilitator/facilitator';
 export * from './facilitator/mock-facilitator';
+export * from './facilitator/quicknode-facilitator';
 export * from './chat';
 export * from './model-stub';
 
 /**
  * Build the facilitator from environment-provided configuration.
  *
- * TODO(real-facilitator): when the real t54 client is implemented, return an
- * instance that talks to XRPL_FACILITATOR_URL on network XRPL_NETWORK. Until
- * then we use the in-memory MockFacilitator so the server runs locally with
- * zero external state. No mainnet values are hardcoded here.
+ * Wire selection (keep it simple):
+ *   - XRPL_RPC_URL is set   -> QuickNodeFacilitator: REAL on-ledger payment
+ *     verification over XRPL JSON-RPC (QuickNode or any public node).
+ *   - otherwise             -> MockFacilitator: zero-config local default,
+ *     so the server runs and all existing tests pass with no network/funds.
+ *
+ * The real facilitator verifies in-process against the ledger (T54 "exact"
+ * scheme) — no hosted facilitator service, no xrpl.js. Nothing mainnet is
+ * hardcoded here; every URL/address/network id comes from the environment.
  */
 export function createFacilitator(config: ServerConfig): Facilitator {
-  // XRPL_FACILITATOR_URL / XRPL_NETWORK are read into config and consumed by
-  // the future real client; the mock is the local default until then.
+  if (config.xrplRpcUrl !== '') {
+    return new QuickNodeFacilitator({
+      network: config.network,
+      receiver: config.paymentReceiver,
+      rewardDrops: config.rewardDrops,
+      rpcUrl: config.xrplRpcUrl,
+      asset: config.paymentAsset,
+      issuer: config.paymentAsset === 'XRP' ? undefined : config.rlusdIssuer,
+    });
+  }
+  // XRPL_FACILITATOR_URL is still read into config for backwards compatibility
+  // with earlier docs; the current design verifies via XRPL_RPC_URL instead.
   void config.facilitatorUrl;
   return new MockFacilitator();
 }
