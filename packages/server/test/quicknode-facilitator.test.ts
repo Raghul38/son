@@ -585,8 +585,8 @@ describe('Facilitator seam wiring (real facilitator)', () => {
       rlusdIssuer: RLUSD_ISSUER,
       logLevel: 'error',
     });
-    const facilitator = createFacilitator(config);
-    expect(facilitator.name).toBe('quicknode-facilitator');
+    // The env-driven wiring picks the real verifier...
+    expect(createFacilitator(config).name).toBe('quicknode-facilitator');
     const ledger = {
       nonce: '',
       amount: { currency: RLUSD_HEX_CODE, value: RLUSD_AMOUNT, issuer: RLUSD_ISSUER },
@@ -604,6 +604,17 @@ describe('Facilitator seam wiring (real facilitator)', () => {
         }),
       };
     }) as unknown as typeof fetch;
+    // ...and the same facilitator is rebuilt from that config with an injected
+    // fetch, so this test stays offline (createFacilitator has no fetch seam).
+    const facilitator = new QuickNodeFacilitator({
+      network: config.network,
+      receiver: config.paymentReceiver,
+      rewardDrops: config.rewardDrops,
+      rpcUrl: config.xrplRpcUrl,
+      asset: config.paymentAsset,
+      issuer: config.rlusdIssuer,
+      fetchImpl,
+    });
     const app = createApp({ facilitator, config, logger: undefined });
     const challengeRes = await request(app)
       .post('/v1/chat')
