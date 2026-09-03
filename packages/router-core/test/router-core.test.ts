@@ -186,7 +186,12 @@ describe('routeRequest — tie-breaking (deterministic)', () => {
   test('default MODEL_TABLE is exported and well-formed', () => {
     expect(MODEL_TABLE.length).toBeGreaterThanOrEqual(4);
     for (const m of MODEL_TABLE) {
-      expect(m.costPer1MTokens).toBeGreaterThan(0);
+      // A price is optional (the provider may publish none), but when it is
+      // there it must be a real positive number — never 0, which would read
+      // as "free" and win every cheapest comparison.
+      if (m.costPer1MTokens !== undefined) {
+        expect(m.costPer1MTokens).toBeGreaterThan(0);
+      }
       expect(m.capabilities.length).toBeGreaterThan(0);
     }
   });

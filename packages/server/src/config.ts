@@ -5,6 +5,8 @@
  * addresses or network ids. All URLs/addresses/network ids are read
  * from the environment (see .env.example).
  */
+import { NVIDIA_DEFAULT_BASE_URL } from './llm/nvidia';
+import { OVHCLOUD_DEFAULT_BASE_URL } from './llm/ovhcloud';
 
 export interface ServerConfig {
   /** Port to listen on. Default 8080 (not 3000 — that is the site's port). */
@@ -81,6 +83,31 @@ export interface ServerConfig {
   llmBaseUrl: string;
   /** Hard deadline for one LLM provider call, in milliseconds. Default 30000. */
   llmTimeoutMs: number;
+  /**
+   * NVIDIA NIM API key (NVIDIA_API_KEY, keys look like "nvapi-…"). When empty,
+   * the "nvidia" provider has no credentials and is not callable.
+   */
+  nvidiaApiKey: string;
+  /** NVIDIA NIM base URL. Default: https://integrate.api.nvidia.com/v1 */
+  nvidiaBaseUrl: string;
+  /**
+   * OVHcloud AI Endpoints access token (OVH_AI_ENDPOINTS_ACCESS_TOKEN).
+   * Optional: the anonymous free tier works without one, but only when
+   * ovhAllowAnonymous is on.
+   */
+  ovhApiKey: string;
+  /**
+   * OVHcloud AI Endpoints base URL.
+   * Default: https://oai.endpoints.kepler.ai.cloud.ovh.net/v1
+   */
+  ovhBaseUrl: string;
+  /**
+   * Allow calling OVHcloud AI Endpoints with NO access token
+   * (OVH_AI_ENDPOINTS_ALLOW_ANONYMOUS). OVHcloud's anonymous tier is free but
+   * capped at 2 requests per minute per IP per model, so this is off by
+   * default: it is a dev/failover convenience, not a production path.
+   */
+  ovhAllowAnonymous: boolean;
   /**
    * Which router-core strategy picks the model (ROUTING_STRATEGY):
    *   - "cheapest" (default) -> the original cheapest-capable routing.
@@ -202,6 +229,11 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     llmApiKey: env('LLM_API_KEY') ?? '',
     llmBaseUrl: env('LLM_BASE_URL') ?? 'https://api.deepseek.com',
     llmTimeoutMs: parsePositiveInt(env('LLM_TIMEOUT_MS'), 30000),
+    nvidiaApiKey: env('NVIDIA_API_KEY') ?? '',
+    nvidiaBaseUrl: env('NVIDIA_BASE_URL') ?? NVIDIA_DEFAULT_BASE_URL,
+    ovhApiKey: env('OVH_AI_ENDPOINTS_ACCESS_TOKEN') ?? '',
+    ovhBaseUrl: env('OVH_AI_ENDPOINTS_BASE_URL') ?? OVHCLOUD_DEFAULT_BASE_URL,
+    ovhAllowAnonymous: parseBool(env('OVH_AI_ENDPOINTS_ALLOW_ANONYMOUS')),
     routingStrategy: parseRoutingStrategy(env('ROUTING_STRATEGY')),
     routingSkipUnconfiguredProviders: parseBool(env('ROUTING_SKIP_UNCONFIGURED_PROVIDERS')),
     routingMaxAttempts: parsePositiveInt(env('ROUTING_MAX_ATTEMPTS'), 2),

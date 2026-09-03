@@ -2,8 +2,10 @@
 
 Payment-gated AI gateway: a client pays a small fee in **XRP or RLUSD** on the
 XRP Ledger (x402-style 402 challenge), and in return gets an AI response from
-`POST /v1/chat` routed to the cheapest capable model — currently **DeepSeek**
-(real provider when `LLM_API_KEY` is set, deterministic stub otherwise).
+`POST /v1/chat` routed to the cheapest capable model across **DeepSeek**,
+**NVIDIA NIM** and **OVHcloud AI Endpoints**, with automatic fallback to the
+next provider when one is unavailable (deterministic stub when no provider key
+is configured, always flagged `stub: true`).
 
 The server never signs for a payer. It issues a 402 payment challenge, the
 payer pays on-ledger with their own wallet, and the server **verifies the
@@ -300,14 +302,72 @@ Other routing controls:
   may try. Only *retryable* provider failures (`LLM_BUSY`, `LLM_TIMEOUT`,
   `LLM_PROVIDER_ERROR`) advance to the next model, and only to a model a real
   adapter can serve — a paying caller is never quietly downgraded to the stub.
-  DeepSeek is currently the only adapter, so in practice one attempt happens;
-  the chain walk starts mattering as soon as a second adapter lands.
+  Raise it when more than one provider is configured, so a failure at one
+  provider can be answered by the next.
 
 Filters are **hard**: capability, cost ceiling, exclude list, provider
 availability, and context capacity each fail the request with their own
 `NO_ROUTE` reason (`no-model-matches`, `no-model-under-cost-ceiling`,
 `all-models-excluded`, `no-available-provider`, `no-model-with-enough-context`)
 rather than silently serving a model that does not meet what was paid for.
+
+### Models with no published price
+
+`costPer1MTokens` is optional in the model table. Absent means **"the provider
+publishes no per-token price"** — it does *not* mean free. NVIDIA's hosted
+`build.nvidia.com` endpoints are the real case: rate-limited and free to
+evaluate, but NVIDIA quotes no token price and treats production use as
+requiring NVIDIA AI Enterprise, so recording `0` would be a false claim.
+
+A router that cannot compare a price must not prefer that model, so an unpriced
+model:
+
+- ranks **last** in the chain (after every priced model), and
+- is **dropped** by any explicit `maxCostPer1MTokens` — a caller who asked for a
+  spend guarantee does not get a model whose cost we cannot show, and
+- carries no `costPer1MTokens` field in the response when it does answer.
+
+It is still reachable: as a fallback after a cheaper model fails, or when it is
+the only candidate its configured provider offers.
+
+## Providers
+
+| Provider | Env key | Endpoint | Models registered | Cost basis |
+|---|---|---|---|---|
+| `deepseek` | `LLM_API_KEY` | `${LLM_BASE_URL}/chat/completions` | `deepseek-v3` (sent as `deepseek-chat`) | published price |
+| `nvidia` | `NVIDIA_API_KEY` | `${NVIDIA_BASE_URL}/chat/completions` — default `https://integrate.api.nvidia.com/v1` | `nvidia/llama-3.1-nemotron-70b-instruct`, `meta/llama-3.2-11b-vision-instruct` | **no published price** (see above) |
+| `ovhcloud` | `OVH_AI_ENDPOINTS_ACCESS_TOKEN` *(or the anonymous free tier)* | `${OVH_AI_ENDPOINTS_BASE_URL}/chat/completions` — default `https://oai.endpoints.kepler.ai.cloud.ovh.net/v1` | `Qwen3.5-397B-A17B` ($0.71/1M in), `Meta-Llama-3_3-70B-Instruct` ($0.74/1M in) | provider's public catalog |
+
+All three speak the same OpenAI-compatible dialect, so they share one transport
+and one error mapping (`src/llm/provider.ts`); each adapter only supplies its
+endpoint, credentials and model-name mapping. Model ids and prices were read
+from each provider's **public catalog**, not from memory — NVIDIA retires models
+on published EOL dates and answers `410 Gone` afterwards, which is why
+`LLM_MODEL_UNAVAILABLE` exists and is retryable.
+
+`NVIDIA_API_KEY` unlocks NVIDIA's free developer tier (~40 rpm, no card).
+NVIDIA's own FAQ puts *production* use — anything beyond development, testing,
+research or evaluation — under NVIDIA AI Enterprise, so treat it as a
+prototyping/failover provider unless you have that entitlement.
+
+OVHcloud AI Endpoints has a genuine anonymous free tier: **2 requests per minute
+per IP per model**, no key, no account, no card (verified with a real
+completion). It is opt-in via `OVH_AI_ENDPOINTS_ALLOW_ANONYMOUS=true` precisely
+because 2 rpm is a development/failover convenience, not a production path. With
+an access token the limit is 400 rpm per Public Cloud project per model, and the
+project needs a payment method (Discovery-mode projects cannot use the service).
+
+Provider errors map to stable codes, and only the retryable ones advance the
+fallback chain:
+
+| Provider HTTP | Code | Our HTTP | Retried with the next model? |
+|---|---|---|---|
+| 401 / 403 | `LLM_AUTH` | 500 | no — our configuration is wrong |
+| 404 / 410 | `LLM_MODEL_UNAVAILABLE` | 502 | yes — the model is gone, others may not be |
+| 429 | `LLM_BUSY` | 503 | yes |
+| 5xx | `LLM_PROVIDER_ERROR` | 502 | yes |
+| timeout | `LLM_TIMEOUT` | 504 | yes |
+| bad body | `LLM_MALFORMED` | 502 | no — retrying will not fix a broken contract |
 
 The classifier, filters, tier model and strategy registry are adapted from
 **ClawRouter** (BlockRunAI/ClawRouter), MIT © 2026 BlockRunAI — see
@@ -329,7 +389,12 @@ SonPay's x402/XRP/RLUSD payment layer and facilitators are unchanged.
 | `RLUSD_ISSUER` | *(empty)* | RLUSD issuer — required only when `PAYMENT_ASSET=RLUSD` |
 | `LLM_API_KEY` | *(empty)* | DeepSeek API key. Empty = stub replies (`stub: true`) |
 | `LLM_BASE_URL` | `https://api.deepseek.com` | OpenAI-compatible endpoint base |
-| `LLM_TIMEOUT_MS` | `30000` | Deadline for one LLM call |
+| `LLM_TIMEOUT_MS` | `30000` | Deadline for one LLM call (all providers) |
+| `NVIDIA_API_KEY` | *(empty)* | NVIDIA NIM key (`nvapi-…`). Empty = the `nvidia` provider is not callable |
+| `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com/v1` | Hosted NIM base URL |
+| `OVH_AI_ENDPOINTS_ACCESS_TOKEN` | *(empty)* | OVHcloud AI Endpoints token (400 rpm). Optional — see the anonymous tier below |
+| `OVH_AI_ENDPOINTS_BASE_URL` | `https://oai.endpoints.kepler.ai.cloud.ovh.net/v1` | AI Endpoints base URL |
+| `OVH_AI_ENDPOINTS_ALLOW_ANONYMOUS` | `false` | Allow calling OVHcloud with no token: free, but 2 requests/min/IP/model |
 | `ROUTING_STRATEGY` | `cheapest` | `cheapest` (original behavior) or `tiered` (classify the prompt, then pick the cheapest model that meets the tier) |
 | `ROUTING_SKIP_UNCONFIGURED_PROVIDERS` | `false` | Route only to providers this server can actually call (adapter + API key) |
 | `ROUTING_MAX_ATTEMPTS` | `2` | Models from the fallback chain one request may try after a retryable provider failure |
@@ -356,7 +421,7 @@ the network.
 
 1. [x] x402 challenge/verify flow (mock facilitator)
 2. [x] Deterministic cheapest-capable routing (+ ClawRouter-derived tiered strategy, fallback chains, provider availability)
-3. [x] DeepSeek as first real LLM provider
+3. [x] Real LLM providers: DeepSeek, NVIDIA NIM, OVHcloud AI Endpoints (shared OpenAI-compatible adapter + cross-provider fallback)
 4. [x] Real on-ledger XRP payment verification via XRPL JSON-RPC (no xrpl.js, no hosted facilitator)
 5. [x] T54 hosted facilitator as an OPTIONAL second facilitator (PAYMENT_FACILITATOR=t54, verify+settle via T54_FACILITATOR_URL)
 6. [~] RLUSD support (same verification path, unit-tested + env-driven flow; live testnet smoke test pending — needs operator testnet RLUSD funds, see "Smoke-test on testnet — RLUSD")

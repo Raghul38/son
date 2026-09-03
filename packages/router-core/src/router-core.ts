@@ -17,8 +17,11 @@ export interface RouteRequest {
 export interface RouteResult {
   /** The chosen model. */
   model: ModelSpec;
-  /** Selected model's cost per 1M tokens (copy of `model.costPer1MTokens`). */
-  costPer1MTokens: number;
+  /**
+   * Selected model's cost per 1M tokens (copy of `model.costPer1MTokens`).
+   * Undefined when the provider publishes no per-token price.
+   */
+  costPer1MTokens?: number;
 }
 
 /**
