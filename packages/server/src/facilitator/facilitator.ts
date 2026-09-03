@@ -21,12 +21,27 @@ export interface PaymentRequest {
   network: string;
   /** Address that receives the payment (the facilitator's / operator's address). */
   receiver: string;
-  /** Amount requested, in XRP drops (1 XRP = 1_000_000 drops). */
+  /**
+   * Amount requested. For XRP this is drops (1 XRP = 1_000_000 drops).
+   * For an issued currency like RLUSD this is the currency value, e.g. "0.01".
+   * The field name stayed "rewardDrops" to keep the x402 wire shape backwards
+   * compatible; see `asset`/`issuer` below.
+   */
   rewardDrops: string;
-  /** Opaque nonce linking this request to a single challenge. */
+  /** Opaque nonce (invoice id) linking this request to a single challenge. */
   nonce: string;
   /** ISO-8601 timestamp after which the request is no longer valid. */
   expiresAt: string;
+  /**
+   * Payment asset — "XRP" (default) or an issued currency such as "RLUSD".
+   * Optional for backwards compatibility: the mock facilitator omits it.
+   */
+  asset?: string;
+  /**
+   * Issuer of an issued currency (required when `asset` is an IOU like RLUSD).
+   * Optional for backwards compatibility: XRP payments do not need it.
+   */
+  issuer?: string;
 }
 
 export interface CreatePaymentRequestOptions {

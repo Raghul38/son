@@ -27,8 +27,30 @@ export interface ServerConfig {
    * PAYMENT_RECEIVER. When empty, the server cannot build payment requests.
    */
   paymentReceiver: string;
-  /** Per-request payment reward in XRP drops. Default 1 XRP. */
+  /**
+   * Per-request payment reward. For XRP this is drops (1 XRP = 1_000_000
+   * drops). For an issued currency like RLUSD this is the currency value
+   * (e.g. "0.01"). Read from PAYMENT_REWARD_DROPS. Default 1 XRP.
+   */
   rewardDrops: string;
+  /**
+   * Real on-ledger verification endpoint (XRPL_RPC_URL): an XRPL JSON-RPC
+   * endpoint such as a QuickNode XRPL endpoint or the public testnet node
+   * https://s.altnet.rippletest.net:51234. When empty (the default) the
+   * zero-config MockFacilitator is used so local dev needs no network.
+   */
+  xrplRpcUrl: string;
+  /**
+   * Payment asset advertised in x402 challenges (PAYMENT_ASSET):
+   * "XRP" (default) or an issued currency such as "RLUSD". RLUSD requires
+   * RLUSD_ISSUER to be configured too.
+   */
+  paymentAsset: string;
+  /**
+   * Issuer of the RLUSD token (RLUSD_ISSUER). Only read when
+   * PAYMENT_ASSET is RLUSD; unused for XRP payments.
+   */
+  rlusdIssuer: string;
   /** Public base URL of this server (used in logs/errors, optional). */
   publicUrl: string;
   /** Request logging level. Default "info". */
@@ -95,6 +117,9 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     network: requireEnv('XRPL_NETWORK', 'xrpl:1'),
     paymentReceiver: requireEnv('PAYMENT_RECEIVER', ''),
     rewardDrops: requireEnv('PAYMENT_REWARD_DROPS', '1000000'),
+    xrplRpcUrl: env('XRPL_RPC_URL') ?? '',
+    paymentAsset: requireEnv('PAYMENT_ASSET', 'XRP'),
+    rlusdIssuer: env('RLUSD_ISSUER') ?? '',
     publicUrl: env('PUBLIC_URL') ?? '',
     logLevel: parseLogLevel(env('LOG_LEVEL')),
     llmApiKey: env('LLM_API_KEY') ?? '',
