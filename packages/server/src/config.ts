@@ -34,10 +34,27 @@ export interface ServerConfig {
    */
   rewardDrops: string;
   /**
+   * Which payment facilitator to use (PAYMENT_FACILITATOR):
+   *   - "mock"      -> MockFacilitator: zero-config local default, no network.
+   *   - "quicknode" -> QuickNodeFacilitator: real on-ledger XRP/RLUSD
+   *                    verification over XRPL JSON-RPC. Requires XRPL_RPC_URL.
+   *   - "t54"       -> T54Facilitator: verify+settle via the hosted T54 x402
+   *                    facilitator. Requires T54_FACILITATOR_URL.
+   * Default "mock" keeps today's zero-config behavior unchanged.
+   */
+  paymentFacilitator: 'mock' | 'quicknode' | 't54';
+  /**
+   * Hosted T54 x402 facilitator base URL (T54_FACILITATOR_URL), e.g.
+   * https://xrpl-facilitator-testnet.t54.ai. Required when
+   * PAYMENT_FACILITATOR=t54. Empty default otherwise.
+   */
+  t54FacilitatorUrl: string;
+  /**
    * Real on-ledger verification endpoint (XRPL_RPC_URL): an XRPL JSON-RPC
    * endpoint such as a QuickNode XRPL endpoint or the public testnet node
-   * https://s.altnet.rippletest.net:51234. When empty (the default) the
-   * zero-config MockFacilitator is used so local dev needs no network.
+   * https://s.altnet.rippletest.net:51234. Used by the QuickNode
+   * facilitator. When empty (the default) and PAYMENT_FACILITATOR=mock,
+   * the zero-config MockFacilitator is used so local dev needs no network.
    */
   xrplRpcUrl: string;
   /**
@@ -108,6 +125,18 @@ function parseLogLevel(value: string | undefined): ServerConfig['logLevel'] {
   }
 }
 
+/** Parse the payment facilitator selector; unknown values fall back to "mock". */
+function parsePaymentFacilitator(value: string | undefined): ServerConfig['paymentFacilitator'] {
+  switch (value) {
+    case 'mock':
+    case 'quicknode':
+    case 't54':
+      return value;
+    default:
+      return 'mock';
+  }
+}
+
 /** Load configuration from process.env. Throws if a required var is missing. */
 export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
   const config: ServerConfig = {
@@ -117,6 +146,8 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     network: requireEnv('XRPL_NETWORK', 'xrpl:1'),
     paymentReceiver: requireEnv('PAYMENT_RECEIVER', ''),
     rewardDrops: requireEnv('PAYMENT_REWARD_DROPS', '1000000'),
+    paymentFacilitator: parsePaymentFacilitator(env('PAYMENT_FACILITATOR')),
+    t54FacilitatorUrl: env('T54_FACILITATOR_URL') ?? '',
     xrplRpcUrl: env('XRPL_RPC_URL') ?? '',
     paymentAsset: requireEnv('PAYMENT_ASSET', 'XRP'),
     rlusdIssuer: env('RLUSD_ISSUER') ?? '',

@@ -201,7 +201,7 @@ in code (it comes from `RLUSD_ISSUER`).
 > on-ledger transaction fields (issuer, currency, amount, destination,
 > nonce, network, validated + not a replay).
 
-## Payment verification checklist (in-process, fail-closed)
+## Payment verification checklist (QuickNode path — in-process, fail-closed)
 
 For every submitted `X-PAYMENT` the server fetches the transaction from the
 XRPL JSON-RPC node (`XRPL_RPC_URL`) and requires ALL of:
@@ -233,6 +233,31 @@ status; only ledger data fetched by the server counts.
 > and holding a payment is possible. Closing this needs a server-side store of
 > issued nonces (tracked with the usage-ledger roadmap item).
 
+## T54 hosted facilitator (optional, opt-in)
+
+`PAYMENT_FACILITATOR=t54` swaps payment verification/settlement to T54's hosted
+x402 facilitator (testnet `https://xrpl-facilitator-testnet.t54.ai`, mainnet
+`https://xrpl-facilitator-mainnet.t54.ai`) instead of the in-process verifier.
+This is the classic x402 merchant flow: the server issues a payment request
+(challenge), the payer signs an XRPL `Payment` (binding the challenge's
+invoice id via memo or `InvoiceID`), and the server asks T54 to verify
+(`POST /verify`) and settle (`POST /settle`) the signed transaction.
+
+- Wire format: x402 v2 — `{ x402Version: 2, accepted: { scheme: "exact",
+  network, asset, payTo, amount, maxTimeoutSeconds, extra: { sourceTag,
+  invoiceId } }, payload: { signedTxBlob } }` (verified from the T54 docs +
+  live hosted-openapi.json, 2026-09-03).
+- Both `/verify` and `/settle` are called: `/settle` is what actually lands the
+  payment and returns the tx hash (the docs' settlement response carries
+  `{ success, transaction, network, payer }`); `/settle` re-runs the
+  verification checklist internally and fails closed before submitting a bad
+  transaction, so calling it on a verified payment is safe and atomic.
+- Fail-closed: any T54 error / non-JSON / timeout / HTTP error returns
+  `valid: false` with reason `facilitator-failure` — never a free response.
+- Requires `T54_FACILITATOR_URL`; the server fails fast at startup with a clear
+  error if it is missing. Do not use this for production without an SLA (T54
+  is currently best-effort testnet/mainnet infrastructure).
+
 ## Environment variables
 
 | Variable | Default | Meaning |
@@ -241,7 +266,9 @@ status; only ledger data fetched by the server counts.
 | `XRPL_NETWORK` | `xrpl:1` | `xrpl:1` = testnet, `xrpl:0` = mainnet |
 | `PAYMENT_RECEIVER` | *(empty)* | Address that collects payments (required for real verification) |
 | `PAYMENT_REWARD_DROPS` | `1000000` | Per-request amount: XRP drops when `PAYMENT_ASSET=XRP`, value (e.g. `0.01`) when `PAYMENT_ASSET=RLUSD` |
-| `XRPL_RPC_URL` | *(empty)* | XRPL JSON-RPC endpoint for REAL on-ledger verification (e.g. QuickNode, or testnet `https://s.altnet.rippletest.net:51234`). Empty = mock facilitator (zero-config dev default) |
+| `PAYMENT_FACILITATOR` | `mock` | Which payment facilitator: `mock` (default — current zero-config behavior: in-process real verifier when `XRPL_RPC_URL` is set, else in-memory mock), `quicknode` (real on-ledger verification via `XRPL_RPC_URL`), or `t54` (hosted T54 facilitator via `T54_FACILITATOR_URL`) |
+| `T54_FACILITATOR_URL` | *(empty)* | Hosted T54 x402 facilitator base URL — required only when `PAYMENT_FACILITATOR=t54` (testnet `https://xrpl-facilitator-testnet.t54.ai`, mainnet `https://xrpl-facilitator-mainnet.t54.ai`) |
+| `XRPL_RPC_URL` | *(empty)* | XRPL JSON-RPC endpoint for REAL on-ledger verification (e.g. QuickNode, or testnet `https://s.altnet.rippletest.net:51234`). Used when `PAYMENT_FACILITATOR=quicknode`. Empty + `mock` = zero-config local dev |
 | `PAYMENT_ASSET` | `XRP` | `XRP` or `RLUSD` (canonical 40-hex currency code `524C555344...`) |
 | `RLUSD_ISSUER` | *(empty)* | RLUSD issuer — required only when `PAYMENT_ASSET=RLUSD` |
 | `LLM_API_KEY` | *(empty)* | DeepSeek API key. Empty = stub replies (`stub: true`) |
@@ -250,7 +277,8 @@ status; only ledger data fetched by the server counts.
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
 
 (`XRPL_FACILITATOR_URL` from earlier docs is deprecated: the current design
-verifies in-process via `XRPL_RPC_URL` instead of a hosted facilitator.)
+verifies in-process via `XRPL_RPC_URL`, or via the hosted T54 facilitator when
+`PAYMENT_FACILITATOR=t54` is set.)
 
 Never commit your `.env` or any private key — the repo's `.gitignore` already
 excludes it.
@@ -271,9 +299,10 @@ the network.
 2. [x] Deterministic cheapest-capable routing
 3. [x] DeepSeek as first real LLM provider
 4. [x] Real on-ledger XRP payment verification via XRPL JSON-RPC (no xrpl.js, no hosted facilitator)
-5. [~] RLUSD support (same verification path, unit-tested + env-driven flow; live testnet smoke test pending — needs operator testnet RLUSD funds, see "Smoke-test on testnet — RLUSD")
-6. [ ] Usage/cost ledger (append-only JSONL per request)
-7. [ ] Platform fee/markup on each request
+5. [x] T54 hosted facilitator as an OPTIONAL second facilitator (PAYMENT_FACILITATOR=t54, verify+settle via T54_FACILITATOR_URL)
+6. [~] RLUSD support (same verification path, unit-tested + env-driven flow; live testnet smoke test pending — needs operator testnet RLUSD funds, see "Smoke-test on testnet — RLUSD")
+7. [ ] Usage/cost ledger (append-only JSONL per request)
+8. [ ] Platform fee/markup on each request
 
 ## License
 
