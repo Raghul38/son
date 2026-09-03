@@ -1,5 +1,5 @@
 import { Capability, ModelSpec, MODEL_TABLE } from './models';
-import { NoRouteError, UnknownCapabilityError } from './errors';
+import { selectCandidates } from './candidates';
 
 export interface RouteRequest {
   /**
@@ -40,47 +40,20 @@ export function routeRequest(
   request: RouteRequest = {},
   table: readonly ModelSpec[] = MODEL_TABLE
 ): RouteResult {
-  const required: readonly Capability[] = request.capabilities ?? [];
-  const known = Array.from(new Set(table.flatMap((m) => m.capabilities)));
+  // The filtering/ordering lives in candidates.ts so the tiered strategy and
+  // the fallback chain reuse exactly this logic. Passing only the two
+  // historical constraints keeps the behavior — and the thrown reasons —
+  // identical to the original implementation.
+  const candidates = selectCandidates(
+    {
+      capabilities: request.capabilities,
+      maxCostPer1MTokens: request.maxCostPer1MTokens,
+    },
+    table
+  );
 
-  if (table.length === 0) {
-    throw new NoRouteError('empty-model-table');
-  }
-
-  // Validate requested capabilities before filtering.
-  for (const cap of required) {
-    if (!(known as readonly string[]).includes(cap)) {
-      throw new UnknownCapabilityError(cap, known);
-    }
-  }
-
-  let candidates: readonly ModelSpec[] = table;
-
-  // (a) capability filter
-  for (const cap of required) {
-    candidates = candidates.filter((m) => m.capabilities.includes(cap));
-  }
-
-  // (b) cost ceiling
-  const ceiling = request.maxCostPer1MTokens;
-  if (ceiling !== undefined) {
-    candidates = candidates.filter((m) => m.costPer1MTokens <= ceiling);
-  }
-
-  if (candidates.length === 0) {
-    const reason =
-      ceiling !== undefined ? 'no-model-under-cost-ceiling' : 'no-model-matches';
-    throw new NoRouteError(reason);
-  }
-
-  // (c) cheapest match; ties broken by table order (first minimal-cost model wins).
-  let best: ModelSpec = candidates[0];
-  for (const m of candidates) {
-    if (m.costPer1MTokens < best.costPer1MTokens) {
-      best = m;
-    }
-  }
-
+  // selectCandidates returns cheapest-first with table order as the tie-break.
+  const best = candidates[0];
   return { model: best, costPer1MTokens: best.costPer1MTokens };
 }
 
@@ -88,6 +61,7 @@ export type { Capability, ModelSpec, ModelId } from './models';
 export {
   RouterError,
   UnknownCapabilityError,
+  UnknownStrategyError,
   NoRouteError,
 } from './errors';
 export type { NoRouteReason } from './errors';
