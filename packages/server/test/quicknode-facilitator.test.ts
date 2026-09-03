@@ -587,12 +587,17 @@ describe('Facilitator seam wiring (real facilitator)', () => {
       rlusdIssuer: RLUSD_ISSUER,
       logLevel: 'error',
     });
+<<<<<<< ours
+    // The env-driven wiring picks the real verifier...
+    expect(createFacilitator(config).name).toBe('quicknode-facilitator');
+=======
     // createFacilitator() must select the real verifier from the config; the
     // instance under test is built via the SAME config values so the on-ledger
     // RPC is exercised through the injectable fetch (no real network in unit
     // tests — this mirrors the XRP e2e test above).
     const configFacilitator = createFacilitator(config);
     expect(configFacilitator.name).toBe('quicknode-facilitator');
+>>>>>>> theirs
     const ledger = {
       nonce: '',
       amount: { currency: RLUSD_HEX_CODE, value: RLUSD_AMOUNT, issuer: RLUSD_ISSUER },
@@ -610,6 +615,11 @@ describe('Facilitator seam wiring (real facilitator)', () => {
         }),
       };
     }) as unknown as typeof fetch;
+<<<<<<< ours
+    // ...and the same facilitator is rebuilt from that config with an injected
+    // fetch, so this test stays offline (createFacilitator has no fetch seam).
+=======
+>>>>>>> theirs
     const facilitator = new QuickNodeFacilitator({
       network: config.network,
       receiver: config.paymentReceiver,

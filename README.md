@@ -105,16 +105,20 @@ import { Client, Wallet } from 'xrpl';
 const client = new Client('wss://s.altnet.rippletest.net:51233');
 await client.connect();
 const wallet = Wallet.fromSeed('<payer testnet seed>'); // never commit this
-const memoHex = Buffer.from('<payment.nonce from the challenge>', 'utf8').toString('hex');
-await client.submitAndWait(wallet.sign({
+// Memo fields are Blobs: hex-encode BOTH MemoType and MemoData, or xrpl.js
+// rejects the tx with "BaseTransaction: invalid Memos".
+const hex = (s) => Buffer.from(s, 'utf8').toString('hex').toUpperCase();
+const prepared = await client.autofill({   // fills Sequence/Fee/LastLedgerSequence
   TransactionType: 'Payment',
   Account: wallet.classicAddress,
   Destination: '<payment.receiver>',
   Amount: '<payment.rewardDrops>',           // drops string, e.g. "1000"
-  Memos: [{ Memo: { MemoType: 'x402', MemoData: memoHex } }],
-  NetworkID: 1,                              // testnet; 0 for mainnet
-  Fee: '12',
-}));
+  Memos: [{ Memo: { MemoType: hex('x402'), MemoData: hex('<payment.nonce>') } }],
+  // Do NOT set NetworkID: mainnet (0) and testnet (1) have network ids <= 1024,
+  // and rippled rejects a tx that carries one — telNETWORK_ID_MAKES_TX_NON_CANONICAL.
+});
+const res = await client.submitAndWait(wallet.sign(prepared).tx_blob);
+console.log(res.result.hash, res.result.meta.TransactionResult); // -> tesSUCCESS
 await client.disconnect();
 ```
 
@@ -162,21 +166,22 @@ in code (it comes from `RLUSD_ISSUER`).
    const client = new Client('wss://s.altnet.rippletest.net:51233');
    await client.connect();
    const wallet = Wallet.fromSeed('<payer testnet seed>'); // never commit this
-   const memoHex = Buffer.from('<payment.nonce from the challenge>', 'utf8').toString('hex');
+   const hex = (s) => Buffer.from(s, 'utf8').toString('hex').toUpperCase();
    const amount = {
      currency: '524C555344000000000000000000000000000000', // RLUSD
      value: '<payment.rewardDrops>',                        // e.g. "0.01"
      issuer: '<RLUSD_ISSUER>',                              // the configured issuer
    };
-   await client.submitAndWait(wallet.sign({
+   const prepared = await client.autofill({  // fills Sequence/Fee/LastLedgerSequence
      TransactionType: 'Payment',
      Account: wallet.classicAddress,
      Destination: '<payment.receiver>',
      Amount: amount,
-     Memos: [{ Memo: { MemoType: 'x402', MemoData: memoHex } }],
-     NetworkID: 1,                              // testnet; 0 for mainnet
-     Fee: '12',
-   }));
+     // Hex-encode both memo fields; omit NetworkID (see the XRP snippet above).
+     Memos: [{ Memo: { MemoType: hex('x402'), MemoData: hex('<payment.nonce>') } }],
+   });
+   const res = await client.submitAndWait(wallet.sign(prepared).tx_blob);
+   console.log(res.result.hash, res.result.meta.TransactionResult); // -> tesSUCCESS
    await client.disconnect();
    ```
 5. Retry with the on-ledger tx hash (same curl as the XRP flow):
@@ -201,6 +206,10 @@ in code (it comes from `RLUSD_ISSUER`).
 For every submitted `X-PAYMENT` the server fetches the transaction from the
 XRPL JSON-RPC node (`XRPL_RPC_URL`) and requires ALL of:
 
+0. the payment terms echoed back in `X-PAYMENT` are the ones this server asked
+   for — `receiver`/`rewardDrops`/`network`/`asset`/`issuer` must equal the
+   configured values, so a payer cannot substitute its own receiver or amount
+   (the nonce and expiry are still payer-supplied — see the gap note below)
 1. validated ledger entry only — `result.validated === true`
 2. `TransactionType === 'Payment'`
 3. `Destination ===` challenge receiver (`PAYMENT_RECEIVER`)
@@ -215,6 +224,14 @@ XRPL JSON-RPC node (`XRPL_RPC_URL`) and requires ALL of:
 Any RPC/network/parse/timeout failure returns `valid: false`
 (`facilitator-failure`) — the server NEVER trusts a client-provided payment
 status; only ledger data fetched by the server counts.
+
+> **Known gap.** The server does not yet remember the challenges it issued, so
+> the `nonce` and `expiresAt` in a submitted `X-PAYMENT` are payer-authored: a
+> payer can bind a payment to a nonce of its own choosing and to a longer
+> validity window. It still has to pay the configured amount to the configured
+> receiver, and each transaction hash is accepted only once — but pre-paying
+> and holding a payment is possible. Closing this needs a server-side store of
+> issued nonces (tracked with the usage-ledger roadmap item).
 
 ## Environment variables
 
