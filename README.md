@@ -258,6 +258,62 @@ invoice id via memo or `InvoiceID`), and the server asks T54 to verify
   error if it is missing. Do not use this for production without an SLA (T54
   is currently best-effort testnet/mainnet infrastructure).
 
+## Routing (router-core)
+
+Routing runs **after** payment verification and is completely separate from it:
+`router-core` is a pure package — no network, no payment, no I/O — so the same
+request always routes to the same model.
+
+Two strategies ship, selected with `ROUTING_STRATEGY`:
+
+| Strategy | What it does |
+|---|---|
+| `cheapest` *(default)* | The original behavior: the cheapest model that has every requested capability and fits `maxCostPer1MTokens`. Ties break by model-table order. |
+| `tiered` | Classifies the prompt first (SIMPLE / MEDIUM / COMPLEX / REASONING), then picks the cheapest model that satisfies **both** the caller's constraints and the tier's capability requirements. A prompt asking for a proof cannot land on a chat-only model; a prompt containing code gets a code-capable model. |
+
+Every decision also returns an ordered **fallback chain** (all eligible models,
+cheapest first). A 200 response carries an additive `routing` block:
+
+```jsonc
+{
+  "model": "deepseek-v3",
+  "content": "...",
+  "routing": {
+    "strategy": "tiered",
+    "tier": "REASONING",
+    "confidence": 0.973,
+    "reasoning": "tier=REASONING | score=0.10 | reasoning (prove, step by step, formally)",
+    "chain": ["deepseek-v3", "mistral-large-2", "claude-3-5-sonnet", "gpt-4o"],
+    "attempts": 1
+  }
+}
+```
+
+Other routing controls:
+
+- `ROUTING_SKIP_UNCONFIGURED_PROVIDERS=true` — never route a **paid** request to
+  a provider this server cannot actually call (no adapter or no API key). With
+  it off (the default) such a request is answered by the stub, as before; with
+  it on and nothing configured the request fails fast with
+  `400 NO_ROUTE / no-available-provider`.
+- `ROUTING_MAX_ATTEMPTS` (default 2) — how many models of the chain one request
+  may try. Only *retryable* provider failures (`LLM_BUSY`, `LLM_TIMEOUT`,
+  `LLM_PROVIDER_ERROR`) advance to the next model, and only to a model a real
+  adapter can serve — a paying caller is never quietly downgraded to the stub.
+  DeepSeek is currently the only adapter, so in practice one attempt happens;
+  the chain walk starts mattering as soon as a second adapter lands.
+
+Filters are **hard**: capability, cost ceiling, exclude list, provider
+availability, and context capacity each fail the request with their own
+`NO_ROUTE` reason (`no-model-matches`, `no-model-under-cost-ceiling`,
+`all-models-excluded`, `no-available-provider`, `no-model-with-enough-context`)
+rather than silently serving a model that does not meet what was paid for.
+
+The classifier, filters, tier model and strategy registry are adapted from
+**ClawRouter** (BlockRunAI/ClawRouter), MIT © 2026 BlockRunAI — see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Only routing logic was taken;
+SonPay's x402/XRP/RLUSD payment layer and facilitators are unchanged.
+
 ## Environment variables
 
 | Variable | Default | Meaning |
@@ -274,6 +330,9 @@ invoice id via memo or `InvoiceID`), and the server asks T54 to verify
 | `LLM_API_KEY` | *(empty)* | DeepSeek API key. Empty = stub replies (`stub: true`) |
 | `LLM_BASE_URL` | `https://api.deepseek.com` | OpenAI-compatible endpoint base |
 | `LLM_TIMEOUT_MS` | `30000` | Deadline for one LLM call |
+| `ROUTING_STRATEGY` | `cheapest` | `cheapest` (original behavior) or `tiered` (classify the prompt, then pick the cheapest model that meets the tier) |
+| `ROUTING_SKIP_UNCONFIGURED_PROVIDERS` | `false` | Route only to providers this server can actually call (adapter + API key) |
+| `ROUTING_MAX_ATTEMPTS` | `2` | Models from the fallback chain one request may try after a retryable provider failure |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
 
 (`XRPL_FACILITATOR_URL` from earlier docs is deprecated: the current design
@@ -296,7 +355,7 @@ the network.
 ## Roadmap
 
 1. [x] x402 challenge/verify flow (mock facilitator)
-2. [x] Deterministic cheapest-capable routing
+2. [x] Deterministic cheapest-capable routing (+ ClawRouter-derived tiered strategy, fallback chains, provider availability)
 3. [x] DeepSeek as first real LLM provider
 4. [x] Real on-ledger XRP payment verification via XRPL JSON-RPC (no xrpl.js, no hosted facilitator)
 5. [x] T54 hosted facilitator as an OPTIONAL second facilitator (PAYMENT_FACILITATOR=t54, verify+settle via T54_FACILITATOR_URL)
@@ -307,3 +366,6 @@ the network.
 ## License
 
 Not yet chosen — a LICENSE file will be added before first public release.
+Third-party code included in this repository (currently the MIT-licensed
+ClawRouter routing logic) is credited in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), which reproduces its license.

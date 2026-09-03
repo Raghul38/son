@@ -81,6 +81,29 @@ export interface ServerConfig {
   llmBaseUrl: string;
   /** Hard deadline for one LLM provider call, in milliseconds. Default 30000. */
   llmTimeoutMs: number;
+  /**
+   * Which router-core strategy picks the model (ROUTING_STRATEGY):
+   *   - "cheapest" (default) -> the original cheapest-capable routing.
+   *   - "tiered"   -> classify the prompt first, then pick the cheapest model
+   *                   that satisfies the tier's capability requirements.
+   * Unknown values fall back to "cheapest" so a typo never changes billing
+   * behavior silently.
+   */
+  routingStrategy: 'cheapest' | 'tiered';
+  /**
+   * Skip models whose provider this server cannot actually call
+   * (ROUTING_SKIP_UNCONFIGURED_PROVIDERS). Off by default, which preserves
+   * today's behavior: an unconfigured provider is routed to and answered by
+   * the stub. On, a paid request is routed only to a provider with a working
+   * adapter + credentials.
+   */
+  routingSkipUnconfiguredProviders: boolean;
+  /**
+   * How many models from the fallback chain may be tried for ONE request
+   * (ROUTING_MAX_ATTEMPTS, default 2). Only retryable provider failures
+   * (busy / timeout / provider error) advance to the next model.
+   */
+  routingMaxAttempts: number;
 }
 
 function env(name: string): string | undefined {
@@ -137,6 +160,29 @@ function parsePaymentFacilitator(value: string | undefined): ServerConfig['payme
   }
 }
 
+/** Parse the routing strategy selector; unknown values fall back to "cheapest". */
+function parseRoutingStrategy(value: string | undefined): ServerConfig['routingStrategy'] {
+  switch (value) {
+    case 'cheapest':
+    case 'tiered':
+      return value;
+    default:
+      return 'cheapest';
+  }
+}
+
+/** Parse a boolean env value ("1"/"true"/"yes" are true); default false. */
+function parseBool(value: string | undefined): boolean {
+  switch ((value ?? '').toLowerCase()) {
+    case '1':
+    case 'true':
+    case 'yes':
+      return true;
+    default:
+      return false;
+  }
+}
+
 /** Load configuration from process.env. Throws if a required var is missing. */
 export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
   const config: ServerConfig = {
@@ -156,6 +202,9 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     llmApiKey: env('LLM_API_KEY') ?? '',
     llmBaseUrl: env('LLM_BASE_URL') ?? 'https://api.deepseek.com',
     llmTimeoutMs: parsePositiveInt(env('LLM_TIMEOUT_MS'), 30000),
+    routingStrategy: parseRoutingStrategy(env('ROUTING_STRATEGY')),
+    routingSkipUnconfiguredProviders: parseBool(env('ROUTING_SKIP_UNCONFIGURED_PROVIDERS')),
+    routingMaxAttempts: parsePositiveInt(env('ROUTING_MAX_ATTEMPTS'), 2),
   };
   return { ...config, ...overrides };
 }

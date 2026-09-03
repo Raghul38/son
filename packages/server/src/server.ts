@@ -16,6 +16,13 @@ export interface AppDeps {
   facilitator: Facilitator;
   config: ServerConfig;
   logger?: Logger;
+  /**
+   * Injectable fetch passed down to the LLM provider adapters. Tests use it to
+   * drive provider responses (including the routing fallback chain) without
+   * any network access; production leaves it undefined and the adapters use
+   * Node's global fetch.
+   */
+  fetchImpl?: typeof fetch;
 }
 
 /** Assemble and return the Express app (does not listen). Tests use this. */
@@ -38,7 +45,7 @@ export function createApp(deps: AppDeps): Express {
   app.post(
     '/v1/chat',
     x402PaymentMiddleware(deps.facilitator, deps.config, log),
-    createChatHandler(deps.config, log)
+    createChatHandler(deps.config, log, deps.fetchImpl)
   );
 
   // 404 for unknown routes.
