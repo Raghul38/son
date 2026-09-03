@@ -17,12 +17,17 @@
  *   walks it when a provider call fails with a retryable error.
  *
  * Provider dispatch, in plain words:
- *   - routed model's provider is "deepseek" AND LLM_API_KEY is set
- *       -> real DeepSeek API call (real completion + token usage).
+ *   - the routed model's provider has an adapter AND credentials
+ *       -> real API call (real completion + token usage). Today that means
+ *          deepseek (LLM_API_KEY), nvidia (NVIDIA_API_KEY) and ovhcloud
+ *          (OVH_AI_ENDPOINTS_ACCESS_TOKEN, or its anonymous free tier when
+ *          OVH_AI_ENDPOINTS_ALLOW_ANONYMOUS is on).
  *   - anything else (no key configured, or openai/anthropic/openrouter)
  *       -> model stub fallback, flagged with `stub: true` so a caller can
  *          never mistake a placeholder for a real answer.
  *     (A later task will return 501 for unconfigured providers instead.)
+ *   See `adapterFor` — it is the single source of truth for both "can we call
+ *   this provider?" and "how do we call it?".
  */
 import { Request, Response } from 'express';
 import {
@@ -36,7 +41,10 @@ import {
   UnknownCapabilityError,
 } from '@xrppay/router-core';
 import { callModel } from './model-stub';
-import { callDeepSeek, LlmError } from './llm/deepseek';
+import { callDeepSeek } from './llm/deepseek';
+import { callNvidia } from './llm/nvidia';
+import { callOvhcloud } from './llm/ovhcloud';
+import { LlmError, ProviderCall } from './llm/provider';
 import { ServerConfig } from './config';
 import { Logger } from './logger';
 import { PayRequest } from './x402';
@@ -49,16 +57,67 @@ export interface ChatRequest {
   requiresStructuredOutput?: boolean;
 }
 
-/** Provider failures worth trying the next model in the chain for. */
+/**
+ * Provider failures worth trying the next model in the chain for.
+ * LLM_MODEL_UNAVAILABLE is in here because a retired model (NVIDIA answers
+ * 410 Gone for one) says nothing about the next candidate.
+ */
 const RETRYABLE_LLM_CODES: ReadonlySet<string> = new Set([
   'LLM_BUSY',
   'LLM_TIMEOUT',
   'LLM_PROVIDER_ERROR',
+  'LLM_MODEL_UNAVAILABLE',
 ]);
+
+/**
+ * The provider registry: provider name (as used in router-core's model table)
+ * -> a bound call, or undefined when this server has no credentials for it.
+ *
+ * This is the single place that decides "can we actually call this provider?",
+ * so `configuredProviders`, the routing availability filter and the fallback
+ * loop can never disagree with each other.
+ */
+function adapterFor(provider: string, config: ServerConfig): ProviderCall | undefined {
+  switch (provider) {
+    case 'deepseek':
+      if (config.llmApiKey === '') return undefined;
+      return (input, fetchImpl) =>
+        callDeepSeek(input, {
+          baseUrl: config.llmBaseUrl,
+          apiKey: config.llmApiKey,
+          timeoutMs: config.llmTimeoutMs,
+          fetchImpl,
+        });
+    case 'nvidia':
+      if (config.nvidiaApiKey === '') return undefined;
+      return (input, fetchImpl) =>
+        callNvidia(input, {
+          baseUrl: config.nvidiaBaseUrl,
+          apiKey: config.nvidiaApiKey,
+          timeoutMs: config.llmTimeoutMs,
+          fetchImpl,
+        });
+    case 'ovhcloud':
+      // OVHcloud's free tier answers without a token, but only at 2 rpm, so
+      // anonymous use has to be asked for explicitly.
+      if (config.ovhApiKey === '' && !config.ovhAllowAnonymous) return undefined;
+      return (input, fetchImpl) =>
+        callOvhcloud(input, {
+          baseUrl: config.ovhBaseUrl,
+          apiKey: config.ovhApiKey,
+          timeoutMs: config.llmTimeoutMs,
+          fetchImpl,
+        });
+    default:
+      return undefined;
+  }
+}
 
 /** Providers this server can actually call right now (adapter + credentials). */
 function configuredProviders(config: ServerConfig): readonly string[] {
-  return config.llmApiKey !== '' ? ['deepseek'] : [];
+  return Array.from(new Set(MODEL_TABLE.map((m) => m.provider))).filter(
+    (p) => adapterFor(p, config) !== undefined
+  );
 }
 
 /** Providers present in the model table that this server cannot call. */
@@ -113,9 +172,9 @@ function routingSummary(decision: RoutingDecision, attempts: number) {
 }
 
 /**
- * Call the provider adapter that owns this model. Today only DeepSeek has an
- * adapter; `isRealProvider` gates which models ever reach this function, so an
- * unknown provider here is a wiring bug rather than a runtime condition.
+ * Call the provider adapter that owns this model. `isRealProvider` gates which
+ * models ever reach this function, so a missing adapter here is a wiring bug
+ * rather than a runtime condition.
  */
 function callProvider(
   model: ModelSpec,
@@ -123,18 +182,11 @@ function callProvider(
   config: ServerConfig,
   fetchImpl?: typeof fetch
 ) {
-  if (model.provider !== 'deepseek') {
+  const call = adapterFor(model.provider, config);
+  if (call === undefined) {
     throw new Error(`No provider adapter wired for "${model.provider}"`);
   }
-  return callDeepSeek(
-    { modelId: model.id, messages: [...messages] },
-    {
-      baseUrl: config.llmBaseUrl,
-      apiKey: config.llmApiKey,
-      timeoutMs: config.llmTimeoutMs,
-      fetchImpl,
-    }
-  );
+  return call({ modelId: model.id, messages: [...messages] }, fetchImpl);
 }
 
 /**

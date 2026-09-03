@@ -68,6 +68,8 @@ describe('cheapest strategy', () => {
       'claude-3-5-haiku-vision',
       'claude-3-5-sonnet',
       'gpt-4o',
+      // No published price -> always last, never preferred.
+      'meta/llama-3.2-11b-vision-instruct',
     ]);
     expect(decision.model).toBe(decision.chain[0]);
   });

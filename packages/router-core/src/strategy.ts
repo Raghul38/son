@@ -78,8 +78,11 @@ export interface RoutingContext extends CandidateQuery {
 export interface RoutingDecision {
   /** The chosen model (the head of `chain`). */
   readonly model: ModelSpec;
-  /** Convenience copy of `model.costPer1MTokens`. */
-  readonly costPer1MTokens: number;
+  /**
+   * Convenience copy of `model.costPer1MTokens`. Undefined when the provider
+   * publishes no per-token price for the selected model.
+   */
+  readonly costPer1MTokens?: number;
   /** Name of the strategy that produced this decision. */
   readonly strategy: string;
   /**

@@ -195,3 +195,59 @@ describe('applyPreference', () => {
     expect(applyPreference(ranked, [])).toBe(ranked);
   });
 });
+
+/**
+ * Models whose provider publishes no per-token price (NVIDIA's hosted
+ * endpoints are the real case). An unknown price is NOT zero: the router must
+ * never prefer such a model, and must never count it as under a ceiling.
+ */
+describe('selectCandidates — models with no published price', () => {
+  const UNPRICED: readonly ModelSpec[] = [
+    ...TABLE,
+    { id: 'unpriced-a', provider: 'delta', capabilities: ['chat', 'json'] },
+    { id: 'unpriced-b', provider: 'delta', capabilities: ['chat', 'json'] },
+  ];
+
+  it('ranks unpriced models last, keeping table order among them', () => {
+    expect(selectCandidates({}, UNPRICED).map((m) => m.id)).toEqual([
+      'cheap',
+      'mid',
+      'rich',
+      'unpriced-a',
+      'unpriced-b',
+    ]);
+  });
+
+  it('drops unpriced models when the caller sets a cost ceiling', () => {
+    expect(selectCandidates({ maxCostPer1MTokens: 100 }, UNPRICED).map((m) => m.id)).toEqual([
+      'cheap',
+      'mid',
+      'rich',
+    ]);
+  });
+
+  it('reports no-model-under-cost-ceiling when only unpriced models qualify', () => {
+    const onlyUnpriced: readonly ModelSpec[] = [
+      { id: 'unpriced-a', provider: 'delta', capabilities: ['chat'] },
+    ];
+    expect(() => selectCandidates({ maxCostPer1MTokens: 100 }, onlyUnpriced)).toThrow(
+      NoRouteError
+    );
+  });
+
+  it('still selects an unpriced model when it is the only candidate left', () => {
+    const picked = selectCandidates(
+      { unavailableProviders: ['alpha', 'beta', 'gamma'] },
+      UNPRICED
+    );
+    expect(picked.map((m) => m.id)).toEqual(['unpriced-a', 'unpriced-b']);
+  });
+
+  it('rankByCost puts every priced model ahead of every unpriced one', () => {
+    const shuffled: readonly ModelSpec[] = [
+      { id: 'unpriced', provider: 'delta', capabilities: ['chat'] },
+      { id: 'pricey', provider: 'delta', capabilities: ['chat'], costPer1MTokens: 999 },
+    ];
+    expect(rankByCost(shuffled).map((m) => m.id)).toEqual(['pricey', 'unpriced']);
+  });
+});

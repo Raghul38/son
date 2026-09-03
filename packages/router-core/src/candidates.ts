@@ -76,10 +76,14 @@ export function selectCandidates(
     candidates = candidates.filter((m) => m.capabilities.includes(cap));
   }
 
-  // (b) cost ceiling.
+  // (b) cost ceiling. A model whose provider publishes no per-token price
+  //     cannot be shown to be under the ceiling, so it fails a ceiling the
+  //     caller set explicitly — the caller asked for a spend guarantee.
   const ceiling = query.maxCostPer1MTokens;
   if (ceiling !== undefined) {
-    candidates = candidates.filter((m) => m.costPer1MTokens <= ceiling);
+    candidates = candidates.filter(
+      (m) => m.costPer1MTokens !== undefined && m.costPer1MTokens <= ceiling
+    );
   }
 
   if (candidates.length === 0) {
@@ -124,9 +128,18 @@ export function selectCandidates(
  * Deterministic ranking: cheapest first; equal cost keeps table order.
  * `Array.prototype.sort` is stable in every supported Node version, so the
  * tie-break is the table order the operator wrote.
+ *
+ * A model with no published price ranks after every priced model (and keeps
+ * table order among its unpriced peers): the router will fall back to it, but
+ * it will never choose it over a model whose cost it can actually compare.
  */
 export function rankByCost(models: readonly ModelSpec[]): readonly ModelSpec[] {
-  return [...models].sort((a, b) => a.costPer1MTokens - b.costPer1MTokens);
+  return [...models].sort((a, b) => costOrInfinity(a) - costOrInfinity(b));
+}
+
+/** Sort key for `rankByCost`: an unpublished price is treated as infinite. */
+function costOrInfinity(model: ModelSpec): number {
+  return model.costPer1MTokens ?? Number.POSITIVE_INFINITY;
 }
 
 /**
