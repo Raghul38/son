@@ -129,6 +129,33 @@ describe('POST /v1/chat — x402 payment gating', () => {
     expect(res.status).toBe(402);
   });
 
+  it('rejects a payment request whose terms are not the ones this server asked for', async () => {
+    // The payer echoes the challenge's payment request back to us, so its
+    // terms are client-supplied: a self-authored receiver/amount must not be
+    // accepted, or a payer could pay itself 1 drop and still be served.
+    const app = buildApp();
+    const challengeRes = await request(app).post('/v1/chat').send({ messages: [] }).expect(402);
+    const challenge = challengePayload(challengeRes);
+
+    const forged = [
+      { ...challenge.payment, receiver: 'rPAYERSOWNwallet00000000000000000000' },
+      { ...challenge.payment, rewardDrops: '1' },
+      { ...challenge.payment, network: 'xrpl:0' },
+      { ...challenge.payment, asset: 'RLUSD', issuer: 'rSOMEISSUER0000000000000000000000000' },
+    ];
+    for (const payment of forged) {
+      const res = await request(app)
+        .post('/v1/chat')
+        .set(
+          X_PAYMENT_HEADER,
+          JSON.stringify({ nonce: challenge.token, signature: 'test-signature', payment })
+        )
+        .send({ messages: [] });
+      expect(res.status).toBe(402);
+      expect(res.body.scheme).toBe('x402');
+    }
+  });
+
   it('rejects an unparseable X-PAYMENT header with 402', async () => {
     const app = buildApp();
     const res = await request(app)

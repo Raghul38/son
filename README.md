@@ -1,85 +1,54 @@
-# Sonpay Gateway (XRP-Pay Router)
+# XRP-Pay Router (SonPay)
 
-A payment-gated AI gateway: AI clients **pay per request** on the XRP Ledger (XRP/RLUSD) using the **x402** flow, and get routed to the **cheapest LLM model that can do the job**.
+Payment-gated AI gateway: a client pays a small fee in **XRP or RLUSD** on the
+XRP Ledger (x402-style 402 challenge), and in return gets an AI response from
+`POST /v1/chat` routed to the cheapest capable model — currently **DeepSeek**
+(real provider when `LLM_API_KEY` is set, deterministic stub otherwise).
 
-Built for autonomous AI agents — clients that can't sign up for accounts or enter credit cards, but *can* sign transactions.
+The server never signs for a payer. It issues a 402 payment challenge, the
+payer pays on-ledger with their own wallet, and the server **verifies the
+transaction on the ledger itself** (in-process verifier, fail-closed) before
+releasing the response.
 
-> Status: work in progress. The payment-gating flow, routing core, DeepSeek
-> integration, and **real on-ledger XRP/RLUSD payment verification** (in-process
-> XRPL JSON-RPC, no facilitator service) are implemented; RLUSD live-testing,
-> the usage ledger, and platform fees are next (see Roadmap).
-
-## How it works (simple version)
-
-```
-Client                    POST /v1/chat with { messages, capabilities?, maxCostPer1MTokens? }
-   │
-   ▼
-x402 middleware           No X-PAYMENT header? -> 402 + challenge:
-                          who to pay (receiver), how much (drops), one-time nonce
-   │
-   ▼
-Payer signs & submits     An XRPL Payment tx (their own wallet) with the
-                          challenge nonce in MemoData; sends the tx hash back
-   │
-   ▼
-Facilitator verifies      QuickNodeFacilitator fetches the tx from the ledger
-                          (XRPL JSON-RPC) and checks EVERY field against the
-                          challenge: validated, Payment type, destination,
-                          exact amount, network id, nonce binding, replay guard
-                          (mock verifier remains the zero-config default)
-   ▼
-Router (router-core)      Picks the cheapest model with the requested capabilities
-   │                      e.g. deepseek-v3 ($0.25/1M) beats gpt-4o ($5.00/1M)
-   ▼
-LLM provider adapter      Real DeepSeek API call (OpenAI-compatible) when LLM_API_KEY is set;
-   │                      stub fallback (marked `stub: true`) when not configured
-   ▼
-Response                  { model, modelProvider, costPer1MTokens, content, usage? }
-```
-
-The server **never signs for the payer** — it only issues challenges and verifies submitted payments.
-
-## Repo layout
+## How the payment flow works
 
 ```
-packages/
-  router-core/    Pure routing logic: model table + cheapest-capable pick. No I/O, fully unit-tested.
-  server/         Express app: x402 middleware, facilitator seam, chat handler, DeepSeek adapter.
-.env.example      Copy to .env and fill in — every URL/address/key comes from env vars.
+Client           Server (SonPay)              XRPL ledger            DeepSeek
+  |  POST /v1/chat  |                            |                      |
+  |---------------->|                            |                      |
+  | 402 + x402 challenge {payment: {network,     |                      |
+  |   receiver, rewardDrops, nonce, asset,       |                      |
+  |   issuer}}       |                            |                      |
+  |<----------------|                            |                      |
+  |                 |                            |                      |
+  | payer submits a Payment tx with the nonce    |                      |
+  | hex-encoded in MemoData (or InvoiceID)  ---->|                      |
+  |                 |                            |                      |
+  |  retry with X-PAYMENT: {txHash, payment}     |                      |
+  |---------------->|                            |                      |
+  |                 |  verifies tx on ledger:    |                      |
+  |                 |  validated, Payment type,  |                      |
+  |                 |  destination, amount,      |                      |
+  |                 |  network, nonce binding,   |                      |
+  |                 |  not a replay              |                      |
+  |                 |        <-------------------|                      |
+  |                 |  (all pass)                |  POST chat          |
+  |                 |----------------------------------------------->|
+  | 200 routed response (real DeepSeek or stub)  |                <----|
+  |<----------------|                            |                      |
 ```
 
-## Quick start
+The 402 challenge is the x402 `payment` object; the retry must send it back
+verbatim as the `payment` field of the `X-PAYMENT` header, together with the
+on-ledger `txHash` of the payment transaction.
 
-Requires **Node.js >= 22**.
-
-```bash
-# 1. Install
-npm install
-
-# 2. Configure (all settings come from env vars — nothing is hardcoded)
-cp .env.example .env
-#    Optional: set LLM_API_KEY to your DeepSeek key to get real completions.
-#    Without a key the server still runs and answers with stub replies (stub: true).
-
-# 3. Build + test
-npm run build
-npm test
-
-# 4. Run
-npm start --workspace @xrppay/server   # or: node packages/server/dist/index.js
-```
-
-### Try the 402 flow
-
-**Zero-config (mock facilitator)** — no network, no funds:
+## Try the 402 flow (mock facilitator — zero config, no funds)
 
 ```bash
 # 1. Unpaid request -> 402 challenge (who to pay, how much, one-time nonce)
 curl -s -X POST http://localhost:8080/v1/chat \
   -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"hello"}]}' | jq
-
 # 2. Retry with an X-PAYMENT header containing the challenge nonce.
 #    Mock facilitator accepts { nonce, signature } for local testing.
 curl -s -X POST http://localhost:8080/v1/chat \
@@ -88,13 +57,15 @@ curl -s -X POST http://localhost:8080/v1/chat \
   -d '{"messages":[{"role":"user","content":"hello"}]}' | jq
 ```
 
-**Real on-ledger verification (testnet)** — see "Smoke-test on testnet" below.
+With `XRPL_RPC_URL` empty, the server uses a zero-config **mock facilitator**:
+no network, no funds, no setup. Set `XRPL_RPC_URL` and everything below to
+switch to **real on-ledger verification**.
 
-## Smoke-test on testnet (real XRP payment)
+## Smoke-test on testnet — XRP
 
 1. Create a testnet wallet and fund it with test XRP:
    <https://xrpl.org/resources/dev-tools.html> (generate a wallet, then use the
-   "Send XRP" tab or the faucet button to fund it — 10,000 test XRP).
+   "Send XRP" tab or the faucet button — 10,000 test XRP).
 2. Configure the server (`.env`):
    ```
    XRPL_NETWORK=xrpl:1
@@ -113,7 +84,7 @@ curl -s -X POST http://localhost:8080/v1/chat \
 4. Send a real Payment tx from the funded wallet to `payment.receiver` for
    exactly `payment.rewardDrops` drops, adding a memo whose `MemoData` is the
    hex encoding of `payment.nonce` (tools that support memos: XRP Ledger Dev
-   Tools "Send" is simple; `xrpl.js` snippet example below).
+   Tools "Send" is simple; `xrpl.js` snippet below).
 5. Retry with the on-ledger tx hash:
    ```bash
    curl -s -X POST http://localhost:8080/v1/chat \
@@ -127,24 +98,140 @@ curl -s -X POST http://localhost:8080/v1/chat \
 
 Minimal `xrpl.js` payer snippet (for step 4; run it separately — the server
 never signs for the payer):
+
 ```js
 // npm i xrpl  (payer-side only, not a server dependency)
 import { Client, Wallet } from 'xrpl';
 const client = new Client('wss://s.altnet.rippletest.net:51233');
 await client.connect();
 const wallet = Wallet.fromSeed('<payer testnet seed>'); // never commit this
-const memoHex = Buffer.from('<payment.nonce from the challenge>', 'utf8').toString('hex');
-await client.submitAndWait(wallet.sign({
+// Memo fields are Blobs: hex-encode BOTH MemoType and MemoData, or xrpl.js
+// rejects the tx with "BaseTransaction: invalid Memos".
+const hex = (s) => Buffer.from(s, 'utf8').toString('hex').toUpperCase();
+const prepared = await client.autofill({   // fills Sequence/Fee/LastLedgerSequence
   TransactionType: 'Payment',
   Account: wallet.classicAddress,
   Destination: '<payment.receiver>',
   Amount: '<payment.rewardDrops>',           // drops string, e.g. "1000"
-  Memos: [{ Memo: { MemoType: 'x402', MemoData: memoHex } }],
-  NetworkID: 1,                              // testnet; 0 for mainnet
-  Fee: '12',
-}));
+  Memos: [{ Memo: { MemoType: hex('x402'), MemoData: hex('<payment.nonce>') } }],
+  // Do NOT set NetworkID: mainnet (0) and testnet (1) have network ids <= 1024,
+  // and rippled rejects a tx that carries one — telNETWORK_ID_MAKES_TX_NON_CANONICAL.
+});
+const res = await client.submitAndWait(wallet.sign(prepared).tx_blob);
+console.log(res.result.hash, res.result.meta.TransactionResult); // -> tesSUCCESS
 await client.disconnect();
 ```
+
+## Smoke-test on testnet — RLUSD
+
+The verification path is identical to XRP ("same path, IOU amounts"); the
+difference is the *asset*, so the payer needs RLUSD and a **trustline** to the
+issuer. The canonical RLUSD issuer used on testnet is
+`rQhWct2fv4Vc4KRjRgMrxa8xPN9Zx9iLKV` (Ripple's testnet issuer — live on the
+testnet ledger). Use **only the issuer you actually accept**; never hardcode it
+in code (it comes from `RLUSD_ISSUER`).
+
+1. Set up a payer wallet with **test XRP AND test RLUSD**, and create a
+   **trustline** to the RLUSD issuer. The XRPL Dev Tools
+   (<https://xrpl.org/resources/dev-tools.html>) provides test XRP; test RLUSD
+   is obtained from the issuer's testnet faucet/drop (the Ripple testnet RLUSD
+   faucet) and the trustline is created with a `TrustSet` transaction to
+   `rQhWct2fv4Vc4KRjRgMrxa8xPN9Zx9iLKV` for RLUSD. (Tools with memo support —
+   e.g. the `xrpl.js` snippet below — make this easy.)
+2. Configure the server (`.env`):
+   ```
+   XRPL_NETWORK=xrpl:1
+   PAYMENT_RECEIVER=<your testnet receiving address>
+   XRPL_RPC_URL=https://s.altnet.rippletest.net:51234   # public testnet node
+   PAYMENT_ASSET=RLUSD
+   RLUSD_ISSUER=rQhWct2fv4Vc4KRjRgMrxa8xPN9Zx9iLKV      # testnet issuer
+   PAYMENT_REWARD_DROPS=0.01                             # 0.01 RLUSD per call
+   ```
+3. Start the server and call the endpoint:
+   ```bash
+   curl -s -X POST http://localhost:8080/v1/chat \
+     -H 'Content-Type: application/json' \
+     -d '{"messages":[{"role":"user","content":"hello"}]}' | jq
+   # -> 402 challenge; payment.asset === "RLUSD", payment.issuer === RLUSD_ISSUER,
+   #    payment.rewardDrops === "0.01"
+   ```
+4. Send a real **RLUSD** Payment tx from the funded wallet to `payment.receiver`
+   for **exactly** the amount in `payment.rewardDrops` (e.g. `0.01` — the value
+   string must match; the verifier normalizes `1.0` = `1` but `0.01` ≠ `0.1`),
+   with the nonce hex-encoded in `MemoData` (RLUSD on testnet uses the
+   canonical 40-hex currency code `524C555344...`). `xrpl.js` snippet:
+   ```js
+   // npm i xrpl  (payer-side only, not a server dependency)
+   import { Client, Wallet } from 'xrpl';
+   const client = new Client('wss://s.altnet.rippletest.net:51233');
+   await client.connect();
+   const wallet = Wallet.fromSeed('<payer testnet seed>'); // never commit this
+   const hex = (s) => Buffer.from(s, 'utf8').toString('hex').toUpperCase();
+   const amount = {
+     currency: '524C555344000000000000000000000000000000', // RLUSD
+     value: '<payment.rewardDrops>',                        // e.g. "0.01"
+     issuer: '<RLUSD_ISSUER>',                              // the configured issuer
+   };
+   const prepared = await client.autofill({  // fills Sequence/Fee/LastLedgerSequence
+     TransactionType: 'Payment',
+     Account: wallet.classicAddress,
+     Destination: '<payment.receiver>',
+     Amount: amount,
+     // Hex-encode both memo fields; omit NetworkID (see the XRP snippet above).
+     Memos: [{ Memo: { MemoType: hex('x402'), MemoData: hex('<payment.nonce>') } }],
+   });
+   const res = await client.submitAndWait(wallet.sign(prepared).tx_blob);
+   console.log(res.result.hash, res.result.meta.TransactionResult); // -> tesSUCCESS
+   await client.disconnect();
+   ```
+5. Retry with the on-ledger tx hash (same curl as the XRP flow):
+   ```bash
+   curl -s -X POST http://localhost:8080/v1/chat \
+     -H 'Content-Type: application/json' \
+     -H "X-PAYMENT: {\"txHash\":\"<the-on-ledger-tx-hash>\",\"payment\":<payment-from-the-challenge>}" \
+     -d '{"messages":[{"role":"user","content":"hello"}]}' | jq
+   ```
+   A correct RLUSD payment returns 200; a wrong issuer, wrong currency,
+   wrong amount, wrong destination, missing nonce memo, or replay returns a
+   fresh 402.
+
+> **Trustline note.** RLUSD is an issued currency (IOU): the *payer* must hold
+> a trustline to `RLUSD_ISSUER` before a RLUSD payment will succeed, and the
+> *receiver* must also hold a trustline. The verifier checks only the
+> on-ledger transaction fields (issuer, currency, amount, destination,
+> nonce, network, validated + not a replay).
+
+## Payment verification checklist (in-process, fail-closed)
+
+For every submitted `X-PAYMENT` the server fetches the transaction from the
+XRPL JSON-RPC node (`XRPL_RPC_URL`) and requires ALL of:
+
+0. the payment terms echoed back in `X-PAYMENT` are the ones this server asked
+   for — `receiver`/`rewardDrops`/`network`/`asset`/`issuer` must equal the
+   configured values, so a payer cannot substitute its own receiver or amount
+   (the nonce and expiry are still payer-supplied — see the gap note below)
+1. validated ledger entry only — `result.validated === true`
+2. `TransactionType === 'Payment'`
+3. `Destination ===` challenge receiver (`PAYMENT_RECEIVER`)
+4. exact `Amount`: XRP drops string; RLUSD amount object with the configured
+   issuer and exact value (`0.01` matches only `0.01`; `1.0` = `1`)
+5. network id matches the challenge (`XRPL_NETWORK` → `xrpl:1` = testnet, id 1)
+6. nonce binding present and matching — `MemoData` (or `InvoiceID`)
+   hex-encodes THIS challenge's nonce
+7. challenge not expired (5 minutes)
+8. not a replay — the tx hash is accepted once only
+
+Any RPC/network/parse/timeout failure returns `valid: false`
+(`facilitator-failure`) — the server NEVER trusts a client-provided payment
+status; only ledger data fetched by the server counts.
+
+> **Known gap.** The server does not yet remember the challenges it issued, so
+> the `nonce` and `expiresAt` in a submitted `X-PAYMENT` are payer-authored: a
+> payer can bind a payment to a nonce of its own choosing and to a longer
+> validity window. It still has to pay the configured amount to the configured
+> receiver, and each transaction hash is accepted only once — but pre-paying
+> and holding a payment is possible. Closing this needs a server-side store of
+> issued nonces (tracked with the usage-ledger roadmap item).
 
 ## Environment variables
 
@@ -165,7 +252,8 @@ await client.disconnect();
 (`XRPL_FACILITATOR_URL` from earlier docs is deprecated: the current design
 verifies in-process via `XRPL_RPC_URL` instead of a hosted facilitator.)
 
-Never commit your `.env` or any private key — the repo's `.gitignore` already excludes it.
+Never commit your `.env` or any private key — the repo's `.gitignore` already
+excludes it.
 
 ## Development
 
@@ -174,7 +262,8 @@ npm test          # build + run all Jest suites across workspaces
 npm run build     # builds router-core first, then server (order matters)
 ```
 
-Tests use injected fakes (mock facilitator, injectable fetch) — nothing touches the network.
+Tests use injected fakes (mock facilitator, injectable fetch) — nothing touches
+the network.
 
 ## Roadmap
 
@@ -182,7 +271,7 @@ Tests use injected fakes (mock facilitator, injectable fetch) — nothing touche
 2. [x] Deterministic cheapest-capable routing
 3. [x] DeepSeek as first real LLM provider
 4. [x] Real on-ledger XRP payment verification via XRPL JSON-RPC (no xrpl.js, no hosted facilitator)
-5. [~] RLUSD support (same verification path, unit-tested; live testnet smoke test pending — see PR)
+5. [~] RLUSD support (same verification path, unit-tested + env-driven flow; live testnet smoke test pending — needs operator testnet RLUSD funds, see "Smoke-test on testnet — RLUSD")
 6. [ ] Usage/cost ledger (append-only JSONL per request)
 7. [ ] Platform fee/markup on each request
 

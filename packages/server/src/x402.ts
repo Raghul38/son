@@ -80,6 +80,30 @@ function extractPaymentRequest(value: unknown): PaymentRequest | null {
 }
 
 /**
+ * The payer echoes the challenge's payment request back in X-PAYMENT, so the
+ * terms it carries are CLIENT-SUPPLIED and must be bound to what this server
+ * actually asked for before the facilitator uses them. Without this check a
+ * payer can submit a self-authored payment request (its own receiver, a
+ * 1-drop amount) and satisfy the on-ledger check with a payment to a wallet
+ * it controls — the operator is paid nothing, but the request is served.
+ *
+ * Only the operator-configured terms are compared here; the nonce/expiry
+ * still come from the payer (binding those needs a server-side challenge
+ * store — see the usage-ledger roadmap item).
+ */
+function matchesServerTerms(req: PaymentRequest, config: ServerConfig): boolean {
+  const expectedAsset = config.paymentAsset;
+  const expectedIssuer = expectedAsset === 'XRP' ? '' : config.rlusdIssuer;
+  return (
+    req.network === config.network &&
+    req.receiver === config.paymentReceiver &&
+    req.rewardDrops === config.rewardDrops &&
+    (req.asset ?? 'XRP') === expectedAsset &&
+    (req.issuer ?? '') === expectedIssuer
+  );
+}
+
+/**
  * Build the x402 payment middleware. Runs before the chat handler and either
  * short-circuits with a 402 (unpaid / rejected) or marks the request paid and
  * calls next().
@@ -117,6 +141,13 @@ export function x402PaymentMiddleware(
     if (!paymentRequest) {
       req.payment = { verified: false, submissionType: 'rejected' };
       log.warn('payment_missing_request', { path: req.path });
+      respondChallenge(res, challenge);
+      return;
+    }
+
+    if (!matchesServerTerms(paymentRequest, config)) {
+      req.payment = { verified: false, submissionType: 'rejected' };
+      log.warn('payment_rejected', { path: req.path, reason: 'terms-mismatch' });
       respondChallenge(res, challenge);
       return;
     }

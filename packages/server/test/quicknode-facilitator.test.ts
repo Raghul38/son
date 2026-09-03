@@ -573,4 +573,69 @@ describe('Facilitator seam wiring (real facilitator)', () => {
     expect(res.status).toBe(402); // rejected -> fresh challenge, fail closed
     expect(res.body.scheme).toBe('x402');
   });
+
+  it('full RLUSD flow via env-driven config: PAYMENT_ASSET=RLUSD -> challenge -> verified -> 200', async () => {
+    // Exactly the .env the operator would set for testnet RLUSD — everything
+    // flows from config (PAYMENT_ASSET/RLUSD_ISSUER), not from code.
+    const RLUSD_AMOUNT = '0.01';
+    const config = loadConfig({
+      paymentReceiver: RECEIVER,
+      network: 'xrpl:1',
+      rewardDrops: RLUSD_AMOUNT,
+      xrplRpcUrl: RPC_URL,
+      paymentAsset: 'RLUSD',
+      rlusdIssuer: RLUSD_ISSUER,
+      logLevel: 'error',
+    });
+    // createFacilitator() must select the real verifier from the config; the
+    // instance under test is built via the SAME config values so the on-ledger
+    // RPC is exercised through the injectable fetch (no real network in unit
+    // tests — this mirrors the XRP e2e test above).
+    const configFacilitator = createFacilitator(config);
+    expect(configFacilitator.name).toBe('quicknode-facilitator');
+    const ledger = {
+      nonce: '',
+      amount: { currency: RLUSD_HEX_CODE, value: RLUSD_AMOUNT, issuer: RLUSD_ISSUER },
+    };
+    const fetchImpl = (async (_url: unknown, init: unknown) => {
+      void init;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          result: ledgerTx({
+            Amount: ledger.amount,
+            Memos: [{ Memo: { MemoData: hex(ledger.nonce) } }],
+          }),
+          }),
+          };
+          }) as unknown as typeof fetch;
+          const facilitator = new QuickNodeFacilitator({
+      network: config.network,
+      receiver: config.paymentReceiver,
+      rewardDrops: config.rewardDrops,
+      rpcUrl: config.xrplRpcUrl,
+      asset: config.paymentAsset,
+      issuer: config.rlusdIssuer,
+      fetchImpl,
+    });
+    const app = createApp({ facilitator, config, logger: undefined });
+    const challengeRes = await request(app)
+      .post('/v1/chat')
+      .send({ messages: [{ role: 'user', content: 'hi' }] })
+      .expect(402);
+    const challenge = challengeRes.body as X402Challenge;
+    expect(challenge.payment.asset).toBe('RLUSD');
+    expect(challenge.payment.issuer).toBe(RLUSD_ISSUER);
+    expect(challenge.payment.rewardDrops).toBe(RLUSD_AMOUNT);
+    expect(challenge.payment.network).toBe('xrpl:1');
+    ledger.nonce = challenge.payment.nonce;
+    const paid = await request(app)
+      .post('/v1/chat')
+      .set(X_PAYMENT_HEADER, JSON.stringify(submittedPayment(TX_HASH, challenge.payment)))
+      .send({ messages: [{ role: 'user', content: 'hi' }] });
+    expect(paid.status).toBe(200);
+    expect(paid.body.model).toBe('deepseek-v3');
+    expect(typeof paid.body.content).toBe('string');
+  });
 });
