@@ -55,6 +55,18 @@ export interface PaymentVerification {
   valid: boolean;
   /** Human-readable reason when invalid. */
   reason?: string;
+  /**
+   * Settlement reference for an accepted payment — the on-ledger transaction
+   * hash for XRPL payments. Optional: a facilitator that cannot supply one
+   * leaves it out, and the caller falls back to the challenge nonce.
+   * Attribution metadata only; it is NOT part of the verification verdict.
+   */
+  paymentId?: string;
+  /**
+   * Address that paid, when the facilitator can attribute the payment.
+   * Optional for the same reason: unknown stays unknown, never invented.
+   */
+  payer?: string;
 }
 
 /** Anything a payer (or SDK) submits as the value of the X-PAYMENT header. */

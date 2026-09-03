@@ -40,6 +40,21 @@ export interface ModelSpec {
    */
   readonly costPer1MTokens?: number;
   /**
+   * Cost in USD per 1M OUTPUT (completion) tokens, when the provider
+   * publishes one.
+   *
+   * Routing never reads this field — it exists so the server can compute what
+   * a served request actually COST, which needs both rates because providers
+   * price completion tokens differently from prompt tokens (OVHcloud charges
+   * 6x more for completion on Qwen3.5, for example).
+   *
+   * The same rule as `costPer1MTokens` applies: `undefined` means "the
+   * provider publishes no completion rate", never "free". A request served by
+   * such a model is metered but NOT priced — applying the prompt rate to
+   * completion tokens would invent money that nobody quoted.
+   */
+  readonly outputCostPer1MTokens?: number;
+  /**
    * Total context window in tokens, as published by the provider. Optional:
    * when it is undefined the capacity filter treats the model as "unknown
    * capacity" and keeps it (same as ClawRouter's capacity filter).
@@ -65,6 +80,12 @@ export interface ModelSpec {
  */
 export const MODEL_TABLE: readonly ModelSpec[] = [
   {
+    // No `outputCostPer1MTokens`: DeepSeek's current price list (read
+    // 2026-09-03) quotes rates for `deepseek-v4-flash` / `deepseek-v4-pro`
+    // only, and it now bills on a peak/off-peak split. Nothing there names
+    // the id this entry maps to, so a completion rate would be a guess and
+    // requests served here are metered but left unpriced. Re-check the
+    // published list before recording one.
     id: 'deepseek-v3',
     provider: 'deepseek',
     capabilities: ['chat', 'tools', 'json', 'reasoning', 'code'],
@@ -130,8 +151,9 @@ export const MODEL_TABLE: readonly ModelSpec[] = [
   // --- OVHcloud AI Endpoints ---------------------------------------------
   // Ids, prices and limits are copied from OVHcloud's PUBLIC catalog
   // (GET https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/models, read
-  // 2026-09-03), which quotes `pricing.prompt` in USD per token — the values
-  // below are that number x 1e6. Nothing here is estimated.
+  // 2026-09-03), which quotes `pricing.prompt` / `pricing.completion` in USD
+  // per token — the values below are those numbers x 1e6. Nothing here is
+  // estimated.
   {
     id: 'Qwen3.5-397B-A17B',
     provider: 'ovhcloud',
@@ -141,6 +163,7 @@ export const MODEL_TABLE: readonly ModelSpec[] = [
     // model capture reasoning traffic from cheaper verified candidates.
     capabilities: ['chat', 'tools', 'json', 'code', 'long-context'],
     costPer1MTokens: 0.71, // catalog: prompt 0.00000071 USD/token
+    outputCostPer1MTokens: 4.25, // catalog: completion 0.00000425 USD/token
     contextWindow: 262_144,
     maxOutputTokens: 262_144,
   },
@@ -149,6 +172,7 @@ export const MODEL_TABLE: readonly ModelSpec[] = [
     provider: 'ovhcloud',
     capabilities: ['chat', 'tools', 'json', 'long-context'],
     costPer1MTokens: 0.74, // catalog: prompt 0.00000074 USD/token
+    outputCostPer1MTokens: 0.74, // catalog: completion 0.00000074 USD/token
     contextWindow: 131_072,
     maxOutputTokens: 131_072,
   },
