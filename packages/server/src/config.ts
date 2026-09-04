@@ -7,6 +7,10 @@
  */
 import { NVIDIA_DEFAULT_BASE_URL } from './llm/nvidia';
 import { OVHCLOUD_DEFAULT_BASE_URL } from './llm/ovhcloud';
+import {
+  DEFAULT_OPENMETER_CUSTOMERS_PATH,
+  DEFAULT_OPENMETER_EVENTS_PATH,
+} from './usage/openmeter';
 
 export interface ServerConfig {
   /** Port to listen on. Default 8080 (not 3000 — that is the site's port). */
@@ -131,6 +135,50 @@ export interface ServerConfig {
    * (busy / timeout / provider error) advance to the next model.
    */
   routingMaxAttempts: number;
+  /**
+   * OpenMeter base URL (OPENMETER_URL). Empty (the default) turns usage
+   * metering OFF — the server still answers and still prices requests.
+   *
+   * For Kong Konnect Metering & Billing this is the REGIONAL KONNECT API
+   * host, e.g. https://in.api.konghq.com — not a gateway proxy hostname.
+   */
+  openmeterUrl: string;
+  /**
+   * OpenMeter / Konnect API token (OPENMETER_API_KEY). Runtime env only:
+   * never commit it, never log it. Empty turns usage metering OFF.
+   */
+  openmeterApiKey: string;
+  /**
+   * Path appended to OPENMETER_URL for event ingestion
+   * (OPENMETER_EVENTS_PATH). Default "/v3/openmeter/events" (Konnect);
+   * self-hosted OpenMeter uses "/api/v1/events".
+   */
+  openmeterEventsPath: string;
+  /**
+   * Path appended to OPENMETER_URL for customer attribution
+   * (OPENMETER_CUSTOMERS_PATH). Default "/v3/openmeter/customers" (Konnect);
+   * self-hosted OpenMeter uses "/api/v1/customers".
+   */
+  openmeterCustomersPath: string;
+  /**
+   * Upsert an OpenMeter customer for a verified payer before reporting its
+   * usage (OPENMETER_AUTO_CREATE_CUSTOMERS, default ON). Without it, events
+   * for an unknown payer are stored but not attributed ("no customer found
+   * for event subject"). Turn it OFF when customers are managed by hand in
+   * the Konnect UI — the server then never writes to the customer list.
+   */
+  openmeterAutoCreateCustomers: boolean;
+  /** CloudEvents `source` on every emitted event (OPENMETER_SOURCE). */
+  openmeterSource: string;
+  /** Hard deadline for one OpenMeter ingest call, ms (OPENMETER_TIMEOUT_MS). */
+  openmeterTimeoutMs: number;
+  /**
+   * Platform markup on the provider's cost, in basis points
+   * (PLATFORM_MARKUP_BPS, default 500 = 5%). customer price = cost x
+   * (1 + bps/10000); platform fee = customer price - cost. 0 means "charge
+   * cost". Only applied to requests we can actually cost — see src/pricing.ts.
+   */
+  platformMarkupBps: number;
 }
 
 function env(name: string): string | undefined {
@@ -198,6 +246,18 @@ function parseRoutingStrategy(value: string | undefined): ServerConfig['routingS
   }
 }
 
+/**
+ * Parse a non-negative integer env value, falling back when absent/invalid.
+ * Unlike `parsePositiveInt`, 0 is a legal value here — a 0 bps markup means
+ * "charge exactly what the provider charged", which an operator may want.
+ */
+function parseNonNegativeInt(value: string | undefined, fallback: number): number {
+  if (value === undefined || value === '') return fallback;
+  const n = Number.parseInt(value, 10);
+  if (Number.isNaN(n) || n < 0) return fallback;
+  return n;
+}
+
 /** Parse a boolean env value ("1"/"true"/"yes" are true); default false. */
 function parseBool(value: string | undefined): boolean {
   switch ((value ?? '').toLowerCase()) {
@@ -207,6 +267,22 @@ function parseBool(value: string | undefined): boolean {
       return true;
     default:
       return false;
+  }
+}
+
+/**
+ * Parse a boolean env value that is ON unless explicitly switched off. Used
+ * for behavior an operator opts OUT of; anything unrecognised keeps the
+ * default rather than silently disabling the feature on a typo.
+ */
+function parseBoolDefaultTrue(value: string | undefined): boolean {
+  switch ((value ?? '').toLowerCase()) {
+    case '0':
+    case 'false':
+    case 'no':
+      return false;
+    default:
+      return true;
   }
 }
 
@@ -237,6 +313,17 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     routingStrategy: parseRoutingStrategy(env('ROUTING_STRATEGY')),
     routingSkipUnconfiguredProviders: parseBool(env('ROUTING_SKIP_UNCONFIGURED_PROVIDERS')),
     routingMaxAttempts: parsePositiveInt(env('ROUTING_MAX_ATTEMPTS'), 2),
+    openmeterUrl: env('OPENMETER_URL') ?? '',
+    openmeterApiKey: env('OPENMETER_API_KEY') ?? '',
+    openmeterEventsPath: env('OPENMETER_EVENTS_PATH') ?? DEFAULT_OPENMETER_EVENTS_PATH,
+    openmeterCustomersPath:
+      env('OPENMETER_CUSTOMERS_PATH') ?? DEFAULT_OPENMETER_CUSTOMERS_PATH,
+    openmeterAutoCreateCustomers: parseBoolDefaultTrue(
+      env('OPENMETER_AUTO_CREATE_CUSTOMERS')
+    ),
+    openmeterSource: env('OPENMETER_SOURCE') ?? 'sonpay',
+    openmeterTimeoutMs: parsePositiveInt(env('OPENMETER_TIMEOUT_MS'), 5000),
+    platformMarkupBps: parseNonNegativeInt(env('PLATFORM_MARKUP_BPS'), 500),
   };
   return { ...config, ...overrides };
 }

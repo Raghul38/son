@@ -102,6 +102,8 @@ interface SubmittedXrplPayment {
 interface LedgerTxJson {
   validated?: unknown;
   TransactionType?: unknown;
+  /** Sending address — attribution only, never part of the verdict. */
+  Account?: unknown;
   Destination?: unknown;
   Amount?: unknown;
   NetworkID?: unknown;
@@ -297,7 +299,14 @@ export class QuickNodeFacilitator implements Facilitator {
     // All checks passed — remember the hash so the same payment cannot be
     // replayed. (In-memory for the MVP; the usage-ledger task adds persistence.)
     this.usedTxHashes.add(txHash);
-    return { valid: true };
+    // Attribution for the usage ledger: the tx hash identifies the money that
+    // moved, and Account is the address that sent it. Both come from the
+    // ledger data WE fetched, never from the client's submission.
+    return {
+      valid: true,
+      paymentId: txHash,
+      payer: typeof tx.Account === 'string' ? tx.Account : undefined,
+    };
   }
 
   /** RPC call to the ledger's `tx` method (the ONLY network this class makes). */

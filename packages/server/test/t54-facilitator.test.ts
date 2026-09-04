@@ -112,11 +112,39 @@ describe('T54Facilitator — hosted x402 verify+settle', () => {
 
     const req = await issuedRequest(f);
     const v = await f.verifyPayment(submittedPayment(INVOICE_ID), req);
-    expect(v).toEqual({ valid: true });
+    // Attribution comes from the settlement response, not from the client.
+    expect(v).toEqual({ valid: true, paymentId: 'A'.repeat(64), payer: 'rPayer' });
     // The same challenge cannot be accepted twice (in-memory replay guard).
     const second = await f.verifyPayment(submittedPayment(INVOICE_ID), req);
     expect(second.valid).toBe(false);
     expect(second.reason).toBe('payment-request-expired');
+  });
+
+  it('leaves the payer unknown when T54 attributes nobody', async () => {
+    // Attribution is optional metadata: a facilitator that cannot name the
+    // payer must not make us invent one, and must not affect the verdict.
+    const fetchImpl = (async (_url: unknown) => {
+      const url = String(_url);
+      if (url.endsWith('/settle')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true, network: 'xrpl:1' }),
+        } as unknown as Response;
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ isValid: true }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    const f = makeFacilitator({ fetchImpl });
+    const req = await issuedRequest(f);
+    const v = await f.verifyPayment(submittedPayment(INVOICE_ID), req);
+
+    expect(v).toEqual({ valid: true });
+    expect(v.payer).toBeUndefined();
   });
 
   it('rejects a payment the facilitator says is invalid (invalidReason surfaced)', async () => {
@@ -222,7 +250,7 @@ describe('T54Facilitator — hosted x402 verify+settle', () => {
       payload: { signedTxBlob: TX_BLOB },
     };
     const v = await f.verifyPayment(attackerEnvelope, req);
-    expect(v).toEqual({ valid: true });
+    expect(v).toEqual({ valid: true, paymentId: 'A'.repeat(64), payer: 'rPayer' });
     const sent = sentRequirements as Record<string, unknown>;
     expect(sent.amount).toBe(AMOUNT_DROPS); // OUR amount, not "1"
     expect(sent.payTo).toBe(RECEIVER); // OUR receiver, not the attacker's

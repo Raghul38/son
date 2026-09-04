@@ -330,13 +330,21 @@ model:
 It is still reachable: as a fallback after a cheaper model fails, or when it is
 the only candidate its configured provider offers.
 
+`ModelSpec` also carries an optional `outputCostPer1MTokens` — the provider's
+**completion** rate, when it publishes one. Routing never reads it (models are
+still ranked by the prompt rate, unchanged); only [cost
+accounting](#usage-metering-and-the-platform-fee) does. Absent means the same
+thing as above: *no published rate*, never zero and never "same as prompt" —
+Qwen3.5 charges 6× more per completion token than per prompt token, so
+reusing one rate for the other would invent money nobody quoted.
+
 ## Providers
 
 | Provider | Env key | Endpoint | Models registered | Cost basis |
 |---|---|---|---|---|
 | `deepseek` | `LLM_API_KEY` | `${LLM_BASE_URL}/chat/completions` | `deepseek-v3` (sent as `deepseek-chat`) | published price |
 | `nvidia` | `NVIDIA_API_KEY` | `${NVIDIA_BASE_URL}/chat/completions` — default `https://integrate.api.nvidia.com/v1` | `nvidia/llama-3.1-nemotron-70b-instruct`, `meta/llama-3.2-11b-vision-instruct` | **no published price** (see above) |
-| `ovhcloud` | `OVH_AI_ENDPOINTS_ACCESS_TOKEN` *(or the anonymous free tier)* | `${OVH_AI_ENDPOINTS_BASE_URL}/chat/completions` — default `https://oai.endpoints.kepler.ai.cloud.ovh.net/v1` | `Qwen3.5-397B-A17B` ($0.71/1M in), `Meta-Llama-3_3-70B-Instruct` ($0.74/1M in) | provider's public catalog |
+| `ovhcloud` | `OVH_AI_ENDPOINTS_ACCESS_TOKEN` *(or the anonymous free tier)* | `${OVH_AI_ENDPOINTS_BASE_URL}/chat/completions` — default `https://oai.endpoints.kepler.ai.cloud.ovh.net/v1` | `Qwen3.5-397B-A17B` ($0.71 in / $4.25 out per 1M), `Meta-Llama-3_3-70B-Instruct` ($0.74 in / $0.74 out per 1M) | provider's public catalog |
 
 All three speak the same OpenAI-compatible dialect, so they share one transport
 and one error mapping (`src/llm/provider.ts`); each adapter only supplies its
@@ -374,6 +382,171 @@ The classifier, filters, tier model and strategy registry are adapted from
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Only routing logic was taken;
 SonPay's x402/XRP/RLUSD payment layer and facilitators are unchanged.
 
+## Usage metering and the platform fee
+
+After a payment verifies **and** a provider actually answers, the server does
+three more things, in this order:
+
+1. **Normalize tokens** — the provider's own `usage` block becomes
+   `{inputTokens, outputTokens, totalTokens}`. The total is derived from the
+   parts only when the provider did not send one; when it did, its total wins
+   (some providers count cached/reasoning tokens in it). Nothing is ever
+   invented: a count the provider did not report stays `undefined`.
+2. **Report usage to OpenMeter** — one `kong.llm_request` CloudEvent per paid
+   request.
+3. **Price the request** — provider cost, customer price and platform fee, in
+   `pricing`.
+
+The split is deliberate: **OpenMeter records usage only. Payment, routing and
+pricing stay in Sonpay** — no price, fee, or payment amount is ever sent to the
+meter.
+
+### The event
+
+`POST ${OPENMETER_URL}${OPENMETER_EVENTS_PATH}`, with
+`Content-Type: application/cloudevents+json` and
+`Authorization: Bearer ${OPENMETER_API_KEY}`:
+
+```jsonc
+{
+  "specversion": "1.0",
+  "type": "kong.llm_request",       // the meter's event type
+  "id": "sonpay:<payment id>",      // deterministic — this is the dedupe key
+  "source": "sonpay",               // OPENMETER_SOURCE
+  "subject": "rPayer…",             // the customer
+  "time": "2026-09-03T12:00:00.000Z",
+  "datacontenttype": "application/json",
+  "data": {
+    "request_id": "sonpay:<payment id>",
+    "customer": "rPayer…",          // payer address, else "payment:<payment id>"
+    "model": "Qwen3.5-397B-A17B",
+    "provider": "ovhcloud",
+    "input_tokens": 12,             // omitted if the provider did not report it
+    "output_tokens": 5,             // omitted if the provider did not report it
+    "total_tokens": 17,
+    "payment_id": "<tx hash or nonce>",
+    "payment_asset": "XRP",
+    "tokens": 17,                   // the metered value: $.tokens, SUM
+    "type": "total"
+  }
+}
+```
+
+The meter it feeds is key `llm_tokens_total` ("LLM Tokens"), event type
+`kong.llm_request`, aggregation `SUM` over `$.tokens`.
+
+`OPENMETER_URL` is the **regional Kong Konnect API host** for hosted Metering &
+Billing (`https://in.api.konghq.com`, `us`/`eu`/`au` likewise), or your own host
+with `OPENMETER_EVENTS_PATH=/api/v1/events` for self-hosted OpenMeter. A
+serverless-gateway proxy hostname (`kong-xxxx.kongcloud.dev`) is **not** the
+ingest endpoint — it answers `no Route matched with those values` on every path.
+
+Both `OPENMETER_URL` and `OPENMETER_API_KEY` must be set, or metering is simply
+`disabled` and the server answers exactly as before. The key is read from the
+environment at startup and never appears in a log line, an error, or a response.
+
+### Who gets billed
+
+The `customer` is the **verified payer identity**, and it is always derived
+server-side from the facilitator's verification: the sending account of the
+on-ledger transaction (`QuickNodeFacilitator`) or the `payer` the hosted
+facilitator reports (`T54Facilitator`). Nothing in the request body can
+influence it — otherwise any caller could charge its tokens to somebody else's
+customer just by asking.
+
+OpenMeter only counts an event against a customer when some Customer entity
+claims its `subject`; an unclaimed event is stored and summed by the meter but
+comes back with `no customer found for event subject` and never reaches a bill.
+So before the first event for a payer, the server upserts the mapping:
+
+```jsonc
+POST ${OPENMETER_URL}${OPENMETER_CUSTOMERS_PATH}
+{ "name": "rPayer…", "key": "rPayer…",
+  "usage_attribution": { "subject_keys": ["rPayer…"] } }
+```
+
+The key **is** the subject, which makes the upsert idempotent: a repeat
+collides on the key (`409`) instead of creating a second customer. On a `409`
+the server reads the customer back and reports whether it really claims that
+subject (`exists` vs `exists-unmapped`) — it never overwrites attribution an
+operator configured by hand. Set `OPENMETER_AUTO_CREATE_CUSTOMERS=false` to
+manage customers yourself; the server then never writes to the customer list.
+
+The upsert runs **before** the event, because a customer created afterwards does
+not retroactively claim it. It cannot cost you the usage, though: if it fails,
+the event is still reported (`"customer": {"status": "failed", …}` next to a
+normal `"status": "sent"`) and the mapping can be repaired for later events.
+
+A payment no facilitator can attribute — the mock facilitator never can — is
+metered under `payment:<payment id>` and deliberately gets **no** customer: one
+customer per payment would be noise, not billing.
+
+### Rules it holds to
+
+- **A duplicate payment cannot create duplicate usage.** The event id is
+  `${OPENMETER_SOURCE}:${payment_id}`, so a replayed `X-PAYMENT` header produces
+  the same id; OpenMeter deduplicates on `(source, id)`, and the server also
+  keeps a bounded in-process set of ids it has already sent, reporting
+  `{"status":"duplicate"}` without a second call. Ids are only remembered when
+  OpenMeter actually accepted them, so a failed send stays retryable.
+- **A metering failure never re-runs the model.** The ingest call has its own
+  deadline (`OPENMETER_TIMEOUT_MS`) and never throws: a rejection, an
+  unreachable meter, or a timeout returns `{"status":"failed","reason":…}`
+  alongside a normal `200` with the answer the caller paid for.
+- **A stub answer is not metered** — a stub burns no tokens — and neither is a
+  response that carried no `usage` block (`{"status":"skipped","reason":
+  "no-token-usage"}`).
+- **A client cannot pick who gets billed.** The customer comes from the
+  facilitator's verification, never from the request body.
+
+### Verified against the live meter
+
+One real paid request on 2026-09-04 — XRPL testnet payment
+`5A236CCE…4AECF7A` verified by `QuickNodeFacilitator`, answered by
+`Meta-Llama-3_3-70B-Instruct`, 43 tokens — against
+`https://in.api.konghq.com/v3/openmeter/events`:
+
+- the event was accepted (`202`) and came back from `GET /v3/openmeter/events`
+  linked to `customer.id` `01M1NZ8G0DYKXZJTC9VEFYP6KY`, **with no
+  `validation_errors`** (an earlier unattributed event on the same instance
+  still carries `no customer found for event subject`);
+- `POST /v3/openmeter/meters/llm_tokens_total/query` went `262` → `305`, exactly
+  `+43`;
+- the customer list holds one entry, `key` = `name` =
+  `rsHzeudMpRr1rdJqPWqcjNi3Z8khCvMBBQ` = the payer that signed the transaction,
+  with `usage_attribution.subject_keys` claiming that same subject;
+- re-posting the byte-identical CloudEvent returned `202` and left the meter at
+  `305`.
+
+### The fee
+
+```
+provider cost = (input_tokens × prompt rate + output_tokens × completion rate) / 1e6
+customer price = provider cost × (1 + PLATFORM_MARKUP_BPS / 10000)
+platform fee   = customer price − provider cost
+```
+
+`PLATFORM_MARKUP_BPS=500` (the default) is 5%. The fee is computed as the
+difference, so `providerCostUsd + platformFeeUsd === customerPriceUsd` exactly;
+amounts are USD rounded to 10 decimals, because rounding a sub-cent request to
+cents would erase the fee entirely.
+
+```jsonc
+"pricing": {
+  "currency": "USD",
+  "providerCostUsd": 0.00002977,
+  "markupBps": 500,
+  "customerPriceUsd": 0.0000312585,
+  "platformFeeUsd": 0.0000014885
+}
+```
+
+Pricing requires **both** published rates and **both** token counts. Anything
+else is reported honestly instead of guessed — the response carries
+`pricingUnavailable` (`model-has-no-published-price` or `no-token-usage`) and no
+`pricing` object. Such a request is still metered: unknown price does not mean
+unknown usage.
+
 ## Environment variables
 
 | Variable | Default | Meaning |
@@ -398,6 +571,14 @@ SonPay's x402/XRP/RLUSD payment layer and facilitators are unchanged.
 | `ROUTING_STRATEGY` | `cheapest` | `cheapest` (original behavior) or `tiered` (classify the prompt, then pick the cheapest model that meets the tier) |
 | `ROUTING_SKIP_UNCONFIGURED_PROVIDERS` | `false` | Route only to providers this server can actually call (adapter + API key) |
 | `ROUTING_MAX_ATTEMPTS` | `2` | Models from the fallback chain one request may try after a retryable provider failure |
+| `OPENMETER_URL` | *(empty)* | Usage-metering base URL: the regional Konnect API host (`https://in.api.konghq.com`) for hosted Metering & Billing, or your own OpenMeter host. Empty = metering disabled |
+| `OPENMETER_API_KEY` | *(empty)* | Konnect token (`kpat_…` / `spat_…`) or OpenMeter API key. **Runtime only — never commit it.** Empty = metering disabled |
+| `OPENMETER_EVENTS_PATH` | `/v3/openmeter/events` | Ingest path appended to `OPENMETER_URL` (self-hosted OpenMeter uses `/api/v1/events`) |
+| `OPENMETER_CUSTOMERS_PATH` | `/v3/openmeter/customers` | Customer path appended to `OPENMETER_URL` (self-hosted OpenMeter uses `/api/v1/customers`) |
+| `OPENMETER_AUTO_CREATE_CUSTOMERS` | `true` | Register a verified payer as an OpenMeter customer before reporting its usage. `false` = you manage customers in the Konnect UI and the server never writes to the customer list |
+| `OPENMETER_SOURCE` | `sonpay` | CloudEvents `source`; also namespaces the event id, which is what deduplicates a replayed payment |
+| `OPENMETER_TIMEOUT_MS` | `5000` | Deadline for one ingest call — a slow meter never holds up a paid answer |
+| `PLATFORM_MARKUP_BPS` | `500` | Markup on the provider's cost in basis points (`500` = 5%). `0` is legal: cost with no fee |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
 
 (`XRPL_FACILITATOR_URL` from earlier docs is deprecated: the current design
@@ -425,8 +606,8 @@ the network.
 4. [x] Real on-ledger XRP payment verification via XRPL JSON-RPC (no xrpl.js, no hosted facilitator)
 5. [x] T54 hosted facilitator as an OPTIONAL second facilitator (PAYMENT_FACILITATOR=t54, verify+settle via T54_FACILITATOR_URL)
 6. [~] RLUSD support (same verification path, unit-tested + env-driven flow; live testnet smoke test pending — needs operator testnet RLUSD funds, see "Smoke-test on testnet — RLUSD")
-7. [ ] Usage/cost ledger (append-only JSONL per request)
-8. [ ] Platform fee/markup on each request
+7. [x] Usage ledger — per-request token usage reported to OpenMeter as `kong.llm_request` (idempotent per payment; failures never re-run the model)
+8. [x] Platform fee/markup on each request (`PLATFORM_MARKUP_BPS`, default 5%; unpriced models are metered, never guessed)
 
 ## License
 

@@ -293,6 +293,11 @@ export class T54Facilitator implements Facilitator {
     // 4. Ask the hosted facilitator to VERIFY the payment.
     let verified: boolean;
     let invalidReason: string | undefined;
+    // Who paid, and the settlement reference — reported by T54 on both
+    // /verify and /settle. Used to attribute usage to a customer; unknown
+    // stays unknown rather than being invented.
+    let payer: string | undefined;
+    let paymentId: string | undefined;
     try {
       const verifyRes = await this.postJson<T54VerifyResponse>('/verify', {
         paymentPayload,
@@ -303,6 +308,8 @@ export class T54Facilitator implements Facilitator {
         typeof verifyRes.invalidReason === 'string'
           ? verifyRes.invalidReason
           : undefined;
+      // Attribution only — the verdict above is what decides access.
+      payer = typeof verifyRes.payer === 'string' ? verifyRes.payer : undefined;
     } catch (err) {
       // Any T54 error / non-JSON / timeout -> fail closed.
       return { valid: false, reason: this.failureReason(err) };
@@ -325,6 +332,10 @@ export class T54Facilitator implements Facilitator {
           typeof settleRes.errorReason === 'string' ? settleRes.errorReason : 'settle-failed';
         return { valid: false, reason: why };
       }
+      // The settlement response is the better source for both: it carries the
+      // on-ledger tx hash, and its payer is the account that actually paid.
+      if (typeof settleRes.transaction === 'string') paymentId = settleRes.transaction;
+      if (typeof settleRes.payer === 'string') payer = settleRes.payer;
     } catch (err) {
       // The payment may or may not have settled — never grant free access.
       // Fail closed: the payer must retry.
@@ -334,7 +345,7 @@ export class T54Facilitator implements Facilitator {
     // 6. Success. Forget the challenge so the same x402 envelope cannot be
     //    replayed (in-memory for the MVP; the usage-ledger task persists).
     this.pending.delete(paymentRequest.nonce);
-    return { valid: true };
+    return { valid: true, ...(paymentId !== undefined && { paymentId }), ...(payer !== undefined && { payer }) };
   }
 
   /** Build T54's PaymentRequirements from OUR issued terms. */

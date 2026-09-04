@@ -105,7 +105,40 @@ describe('QuickNodeFacilitator — real XRP payment verification', () => {
       submittedPayment(TX_HASH, challengeRequest()),
       challengeRequest()
     );
-    expect(v).toEqual({ valid: true });
+    expect(v).toMatchObject({ valid: true });
+  });
+
+  it('attributes an accepted payment with the tx hash and the paying address', async () => {
+    // Attribution feeds the usage ledger (customer + payment_id). Both values
+    // come from the ledger data the facilitator fetched, never from the
+    // client's submission.
+    const f = makeFacilitator({
+      fetchImpl: rpcResponder({
+        result: ledgerTx({ Memos: [{ Memo: { MemoData: hex('nonce-1') } }] }),
+      }),
+    });
+    const v = await f.verifyPayment(
+      submittedPayment(TX_HASH, challengeRequest()),
+      challengeRequest()
+    );
+    expect(v).toEqual({
+      valid: true,
+      paymentId: TX_HASH,
+      payer: 'rPayerAddr1234567890abcdefghijklmn',
+    });
+  });
+
+  it('leaves the payer undefined when the ledger entry carries no Account', async () => {
+    const f = makeFacilitator({
+      fetchImpl: rpcResponder({
+        result: ledgerTx({ Account: undefined, Memos: [{ Memo: { MemoData: hex('nonce-1') } }] }),
+      }),
+    });
+    const v = await f.verifyPayment(
+      submittedPayment(TX_HASH, challengeRequest()),
+      challengeRequest()
+    );
+    expect(v).toEqual({ valid: true, paymentId: TX_HASH, payer: undefined });
   });
 
   it('rejects an unvalidated (not-yet-confirmed) ledger entry', async () => {
@@ -357,7 +390,7 @@ describe('QuickNodeFacilitator — real XRP payment verification', () => {
       submittedPayment(TX_HASH, challengeRequest()),
       challengeRequest()
     );
-    expect(v).toEqual({ valid: true });
+    expect(v).toMatchObject({ valid: true });
   });
 });
 
@@ -390,7 +423,7 @@ describe('QuickNodeFacilitator — RLUSD (issued currency, same path)', () => {
       submittedPayment(TX_HASH, rlusdChallenge()),
       rlusdChallenge()
     );
-    expect(v).toEqual({ valid: true });
+    expect(v).toMatchObject({ valid: true });
   });
 
   it('normalizes IOU values: ledger "1.0" matches challenge "1"', async () => {
@@ -407,7 +440,7 @@ describe('QuickNodeFacilitator — RLUSD (issued currency, same path)', () => {
       submittedPayment(TX_HASH, rlusdChallenge()),
       rlusdChallenge()
     );
-    expect(v).toEqual({ valid: true });
+    expect(v).toMatchObject({ valid: true });
   });
 
   it('rejects RLUSD paid from the wrong issuer', async () => {

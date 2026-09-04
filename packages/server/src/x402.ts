@@ -48,6 +48,23 @@ declare global {
 export interface PaymentState {
   verified: boolean;
   submissionType: 'none' | 'paid' | 'rejected';
+  /**
+   * Identifier of the payment that unlocked this request: the on-ledger
+   * transaction hash when the facilitator reports one, otherwise the
+   * challenge nonce (invoice id). Set only on a verified payment.
+   *
+   * Downstream this is what makes usage metering idempotent — the same
+   * payment always produces the same usage event id (see src/usage).
+   */
+  paymentId?: string;
+  /** Asset the payment was denominated in ("XRP" / "RLUSD"). */
+  asset?: string;
+  /**
+   * Payer identity, when the facilitator can attribute the payment (the
+   * sending address, for an on-ledger XRPL payment). Undefined otherwise —
+   * an unattributable payment is left unattributed rather than guessed.
+   */
+  payer?: string;
 }
 
 /** Bump Request to carry our app state without global type surgery. */
@@ -234,7 +251,15 @@ export function x402PaymentMiddleware(
       return;
     }
 
-    req.payment = { verified: true, submissionType: 'paid' };
+    req.payment = {
+      verified: true,
+      submissionType: 'paid',
+      // Prefer the facilitator's settlement reference (an on-ledger tx hash)
+      // over the challenge nonce: it is the identity of the money that moved.
+      paymentId: verification.paymentId ?? paymentRequest.nonce,
+      asset: paymentRequest.asset ?? 'XRP',
+      payer: verification.payer,
+    };
     log.info('payment_verified', {
       path: req.path,
       nonce: paymentRequest.nonce.slice(0, 12),
