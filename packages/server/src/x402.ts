@@ -19,6 +19,7 @@
  */
 import { NextFunction, Request, RequestHandler, Response } from 'express';
 import { Facilitator, PaymentRequest } from './facilitator/facilitator';
+import { RLUSD_HEX_CODE } from './facilitator/quicknode-facilitator';
 import { ServerConfig } from './config';
 import { Logger } from './logger';
 
@@ -47,6 +48,23 @@ declare global {
 export interface PaymentState {
   verified: boolean;
   submissionType: 'none' | 'paid' | 'rejected';
+  /**
+   * Identifier of the payment that unlocked this request: the on-ledger
+   * transaction hash when the facilitator reports one, otherwise the
+   * challenge nonce (invoice id). Set only on a verified payment.
+   *
+   * Downstream this is what makes usage metering idempotent — the same
+   * payment always produces the same usage event id (see src/usage).
+   */
+  paymentId?: string;
+  /** Asset the payment was denominated in ("XRP" / "RLUSD"). */
+  asset?: string;
+  /**
+   * Payer identity, when the facilitator can attribute the payment (the
+   * sending address, for an on-ledger XRPL payment). Undefined otherwise —
+   * an unattributable payment is left unattributed rather than guessed.
+   */
+  payer?: string;
 }
 
 /** Bump Request to carry our app state without global type surgery. */
@@ -72,11 +90,50 @@ function respondChallenge(res: Response, challenge: X402Challenge): void {
 function extractPaymentRequest(value: unknown): PaymentRequest | null {
   if (typeof value !== 'object' || value === null) return null;
   const obj = value as Record<string, unknown>;
+
+  // T54-style x402 v2 envelope: the terms live in `accepted` (not `payment`).
+  if (typeof obj.accepted === 'object' && obj.accepted !== null) {
+    const a = obj.accepted as Record<string, unknown>;
+    if (typeof a.payTo !== 'string' || a.payTo === '') return null;
+    const extra = (typeof a.extra === 'object' && a.extra !== null ? a.extra : {}) as Record<string, unknown>;
+    // T54 uses the canonical 40-hex currency code for IOUs; offer the display
+    // symbol "RLUSD" so the server terms comparision below can match.
+    const asset = a.asset === RLUSD_HEX_CODE ? 'RLUSD' : (a.asset as string) ?? 'XRP';
+    return {
+      network: (a.network as string) ?? 'xrpl:1',
+      receiver: a.payTo,
+      rewardDrops: (a.amount as string) ?? '',
+      nonce: (extra.invoiceId as string) ?? '',
+      expiresAt: new Date(Date.now() + 60 * 1000).toISOString(),
+      asset: asset === 'XRP' ? undefined : asset,
+      issuer: (extra.issuer as string) ?? undefined,
+    } as PaymentRequest;
+  }
+
   const p = obj.payment;
   if (typeof p !== 'object' || p === null) return null;
   const pobj = p as Record<string, unknown>;
   if (typeof pobj.nonce !== 'string' || pobj.nonce.length === 0) return null;
   return pobj as unknown as PaymentRequest;
+}
+
+/**
+ * When the payer submits a T54-style x402 v2 envelope, the facilitator expects
+ * the WHOLE envelope as `paymentPayload` (the spec's PaymentPayload). Returns
+ * the `accepted` copy (normalized) for the middleware's terms check, and the
+ * full envelope for the facilitator.
+ */
+function splitX402Submission(
+  value: unknown
+): { accepted: Record<string, unknown> | null; envelope: Record<string, unknown> } {
+  if (typeof value !== 'object' || value === null) {
+    return { accepted: null, envelope: {} };
+  }
+  const obj = value as Record<string, unknown>;
+  if (typeof obj.accepted === 'object' && obj.accepted !== null) {
+    return { accepted: obj.accepted as Record<string, unknown>, envelope: obj };
+  }
+  return { accepted: null, envelope: obj };
 }
 
 /**
@@ -91,15 +148,38 @@ function extractPaymentRequest(value: unknown): PaymentRequest | null {
  * still come from the payer (binding those needs a server-side challenge
  * store — see the usage-ledger roadmap item).
  */
-function matchesServerTerms(req: PaymentRequest, config: ServerConfig): boolean {
+function matchesServerTerms(value: unknown, config: ServerConfig): boolean {
   const expectedAsset = config.paymentAsset;
   const expectedIssuer = expectedAsset === 'XRP' ? '' : config.rlusdIssuer;
+
+  // v1 shape: the payer echoes our PaymentRequest (`payment` field).
+  const p = (value as Record<string, unknown>)?.payment as Record<string, unknown> | undefined;
+  if (typeof p === 'object' && p !== null && typeof p.nonce === 'string') {
+    const req = p as unknown as PaymentRequest;
+    return (
+      req.network === config.network &&
+      req.receiver === config.paymentReceiver &&
+      req.rewardDrops === config.rewardDrops &&
+      (req.asset ?? 'XRP') === expectedAsset &&
+      (req.issuer ?? '') === expectedIssuer
+    );
+  }
+
+  // v2-shape (T54): terms live in `accepted`. Normalize the 40-hex currency
+  // code back to the configured display asset for comparison.
+  const { accepted } = splitX402Submission(value);
+  if (!accepted) return false;
+  const asset =
+    accepted.asset === RLUSD_HEX_CODE
+      ? 'RLUSD'
+      : (accepted.asset as string) ?? 'XRP';
+  const extra = (accepted.extra ?? {}) as Record<string, unknown>;
   return (
-    req.network === config.network &&
-    req.receiver === config.paymentReceiver &&
-    req.rewardDrops === config.rewardDrops &&
-    (req.asset ?? 'XRP') === expectedAsset &&
-    (req.issuer ?? '') === expectedIssuer
+    (accepted.network as string) === config.network &&
+    (accepted.payTo as string) === config.paymentReceiver &&
+    (accepted.amount as string) === config.rewardDrops &&
+    asset === expectedAsset &&
+    ((extra.issuer as string) ?? '') === expectedIssuer
   );
 }
 
@@ -145,14 +225,22 @@ export function x402PaymentMiddleware(
       return;
     }
 
-    if (!matchesServerTerms(paymentRequest, config)) {
+    if (!matchesServerTerms(submitted, config)) {
       req.payment = { verified: false, submissionType: 'rejected' };
       log.warn('payment_rejected', { path: req.path, reason: 'terms-mismatch' });
       respondChallenge(res, challenge);
       return;
     }
 
-    const verification = await facilitator.verifyPayment(submitted, paymentRequest);
+    // v2 (T54) envelopes carry the FULL x402 payload (paymentPayload) that the
+    // facilitator must verify/settle; v1 carries the echoed PaymentRequest.
+    const { envelope } = splitX402Submission(submitted);
+    const facilitatorInput = envelope.accepted ? envelope : submitted;
+
+    const verification = await facilitator.verifyPayment(
+      facilitatorInput,
+      paymentRequest
+    );
     if (!verification.valid) {
       req.payment = { verified: false, submissionType: 'rejected' };
       log.warn('payment_rejected', {
@@ -163,7 +251,15 @@ export function x402PaymentMiddleware(
       return;
     }
 
-    req.payment = { verified: true, submissionType: 'paid' };
+    req.payment = {
+      verified: true,
+      submissionType: 'paid',
+      // Prefer the facilitator's settlement reference (an on-ledger tx hash)
+      // over the challenge nonce: it is the identity of the money that moved.
+      paymentId: verification.paymentId ?? paymentRequest.nonce,
+      asset: paymentRequest.asset ?? 'XRP',
+      payer: verification.payer,
+    };
     log.info('payment_verified', {
       path: req.path,
       nonce: paymentRequest.nonce.slice(0, 12),
