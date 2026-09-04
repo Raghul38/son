@@ -7,7 +7,10 @@
  */
 import { NVIDIA_DEFAULT_BASE_URL } from './llm/nvidia';
 import { OVHCLOUD_DEFAULT_BASE_URL } from './llm/ovhcloud';
-import { DEFAULT_OPENMETER_EVENTS_PATH } from './usage/openmeter';
+import {
+  DEFAULT_OPENMETER_CUSTOMERS_PATH,
+  DEFAULT_OPENMETER_EVENTS_PATH,
+} from './usage/openmeter';
 
 export interface ServerConfig {
   /** Port to listen on. Default 8080 (not 3000 — that is the site's port). */
@@ -151,6 +154,20 @@ export interface ServerConfig {
    * self-hosted OpenMeter uses "/api/v1/events".
    */
   openmeterEventsPath: string;
+  /**
+   * Path appended to OPENMETER_URL for customer attribution
+   * (OPENMETER_CUSTOMERS_PATH). Default "/v3/openmeter/customers" (Konnect);
+   * self-hosted OpenMeter uses "/api/v1/customers".
+   */
+  openmeterCustomersPath: string;
+  /**
+   * Upsert an OpenMeter customer for a verified payer before reporting its
+   * usage (OPENMETER_AUTO_CREATE_CUSTOMERS, default ON). Without it, events
+   * for an unknown payer are stored but not attributed ("no customer found
+   * for event subject"). Turn it OFF when customers are managed by hand in
+   * the Konnect UI — the server then never writes to the customer list.
+   */
+  openmeterAutoCreateCustomers: boolean;
   /** CloudEvents `source` on every emitted event (OPENMETER_SOURCE). */
   openmeterSource: string;
   /** Hard deadline for one OpenMeter ingest call, ms (OPENMETER_TIMEOUT_MS). */
@@ -253,6 +270,22 @@ function parseBool(value: string | undefined): boolean {
   }
 }
 
+/**
+ * Parse a boolean env value that is ON unless explicitly switched off. Used
+ * for behavior an operator opts OUT of; anything unrecognised keeps the
+ * default rather than silently disabling the feature on a typo.
+ */
+function parseBoolDefaultTrue(value: string | undefined): boolean {
+  switch ((value ?? '').toLowerCase()) {
+    case '0':
+    case 'false':
+    case 'no':
+      return false;
+    default:
+      return true;
+  }
+}
+
 /** Load configuration from process.env. Throws if a required var is missing. */
 export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
   const config: ServerConfig = {
@@ -283,6 +316,11 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     openmeterUrl: env('OPENMETER_URL') ?? '',
     openmeterApiKey: env('OPENMETER_API_KEY') ?? '',
     openmeterEventsPath: env('OPENMETER_EVENTS_PATH') ?? DEFAULT_OPENMETER_EVENTS_PATH,
+    openmeterCustomersPath:
+      env('OPENMETER_CUSTOMERS_PATH') ?? DEFAULT_OPENMETER_CUSTOMERS_PATH,
+    openmeterAutoCreateCustomers: parseBoolDefaultTrue(
+      env('OPENMETER_AUTO_CREATE_CUSTOMERS')
+    ),
     openmeterSource: env('OPENMETER_SOURCE') ?? 'sonpay',
     openmeterTimeoutMs: parsePositiveInt(env('OPENMETER_TIMEOUT_MS'), 5000),
     platformMarkupBps: parseNonNegativeInt(env('PLATFORM_MARKUP_BPS'), 500),

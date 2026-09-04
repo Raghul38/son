@@ -445,6 +445,42 @@ Both `OPENMETER_URL` and `OPENMETER_API_KEY` must be set, or metering is simply
 `disabled` and the server answers exactly as before. The key is read from the
 environment at startup and never appears in a log line, an error, or a response.
 
+### Who gets billed
+
+The `customer` is the **verified payer identity**, and it is always derived
+server-side from the facilitator's verification: the sending account of the
+on-ledger transaction (`QuickNodeFacilitator`) or the `payer` the hosted
+facilitator reports (`T54Facilitator`). Nothing in the request body can
+influence it — otherwise any caller could charge its tokens to somebody else's
+customer just by asking.
+
+OpenMeter only counts an event against a customer when some Customer entity
+claims its `subject`; an unclaimed event is stored and summed by the meter but
+comes back with `no customer found for event subject` and never reaches a bill.
+So before the first event for a payer, the server upserts the mapping:
+
+```jsonc
+POST ${OPENMETER_URL}${OPENMETER_CUSTOMERS_PATH}
+{ "name": "rPayer…", "key": "rPayer…",
+  "usage_attribution": { "subject_keys": ["rPayer…"] } }
+```
+
+The key **is** the subject, which makes the upsert idempotent: a repeat
+collides on the key (`409`) instead of creating a second customer. On a `409`
+the server reads the customer back and reports whether it really claims that
+subject (`exists` vs `exists-unmapped`) — it never overwrites attribution an
+operator configured by hand. Set `OPENMETER_AUTO_CREATE_CUSTOMERS=false` to
+manage customers yourself; the server then never writes to the customer list.
+
+The upsert runs **before** the event, because a customer created afterwards does
+not retroactively claim it. It cannot cost you the usage, though: if it fails,
+the event is still reported (`"customer": {"status": "failed", …}` next to a
+normal `"status": "sent"`) and the mapping can be repaired for later events.
+
+A payment no facilitator can attribute — the mock facilitator never can — is
+metered under `payment:<payment id>` and deliberately gets **no** customer: one
+customer per payment would be noise, not billing.
+
 ### Rules it holds to
 
 - **A duplicate payment cannot create duplicate usage.** The event id is
@@ -460,6 +496,8 @@ environment at startup and never appears in a log line, an error, or a response.
 - **A stub answer is not metered** — a stub burns no tokens — and neither is a
   response that carried no `usage` block (`{"status":"skipped","reason":
   "no-token-usage"}`).
+- **A client cannot pick who gets billed.** The customer comes from the
+  facilitator's verification, never from the request body.
 
 ### The fee
 
@@ -517,6 +555,8 @@ unknown usage.
 | `OPENMETER_URL` | *(empty)* | Usage-metering base URL: the regional Konnect API host (`https://in.api.konghq.com`) for hosted Metering & Billing, or your own OpenMeter host. Empty = metering disabled |
 | `OPENMETER_API_KEY` | *(empty)* | Konnect token (`kpat_…` / `spat_…`) or OpenMeter API key. **Runtime only — never commit it.** Empty = metering disabled |
 | `OPENMETER_EVENTS_PATH` | `/v3/openmeter/events` | Ingest path appended to `OPENMETER_URL` (self-hosted OpenMeter uses `/api/v1/events`) |
+| `OPENMETER_CUSTOMERS_PATH` | `/v3/openmeter/customers` | Customer path appended to `OPENMETER_URL` (self-hosted OpenMeter uses `/api/v1/customers`) |
+| `OPENMETER_AUTO_CREATE_CUSTOMERS` | `true` | Register a verified payer as an OpenMeter customer before reporting its usage. `false` = you manage customers in the Konnect UI and the server never writes to the customer list |
 | `OPENMETER_SOURCE` | `sonpay` | CloudEvents `source`; also namespaces the event id, which is what deduplicates a replayed payment |
 | `OPENMETER_TIMEOUT_MS` | `5000` | Deadline for one ingest call — a slow meter never holds up a paid answer |
 | `PLATFORM_MARKUP_BPS` | `500` | Markup on the provider's cost in basis points (`500` = 5%). `0` is legal: cost with no fee |

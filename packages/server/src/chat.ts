@@ -32,7 +32,8 @@
  * After a real provider answers, and only then, the handler:
  *   1. normalizes the provider's own input/output/total token counts,
  *   2. reports them to OpenMeter as one `kong.llm_request` event, keyed by the
- *      payment so a duplicate payment cannot double count (src/usage),
+ *      payment so a duplicate payment cannot double count, attributed to the
+ *      verified payer identity (src/usage),
  *   3. prices the call — provider cost, +PLATFORM_MARKUP_BPS, platform fee
  *      (src/pricing) — and returns both blocks with the answer.
  * Neither step can fail the request: metering failures are logged, and a model
@@ -206,12 +207,27 @@ function callProvider(
 }
 
 /**
- * Who used the tokens. The payer address when the facilitator could attribute
- * the payment, otherwise the payment itself — an unattributable payment gets
- * a real, stable identifier rather than an invented account name.
+ * Who used the tokens.
+ *
+ * The identity is ALWAYS server-derived: it is the payer the facilitator
+ * attributed while verifying the payment on-ledger (QuickNode returns the
+ * sending account, T54 returns `payer`). Nothing a client puts in the request
+ * body can influence it — otherwise any caller could bill its usage to
+ * somebody else's customer by asking.
+ *
+ * When the facilitator cannot attribute a payer (the mock facilitator never
+ * can), the payment itself is the identity: a real, stable handle instead of
+ * an invented account name. Such a subject is deliberately NOT registered as
+ * a customer — one customer per payment would be noise, not billing.
  */
-function customerOf(payment: PaymentState | undefined, paymentId: string): string {
-  return payment?.payer ?? `payment:${paymentId}`;
+function customerOf(
+  payment: PaymentState | undefined,
+  paymentId: string
+): { subject: string; attributable: boolean } {
+  const payer = payment?.payer;
+  return payer !== undefined && payer !== ''
+    ? { subject: payer, attributable: true }
+    : { subject: `payment:${paymentId}`, attributable: false };
 }
 
 /**
@@ -241,9 +257,10 @@ async function meterUsage(
 
   const paymentId = payment.paymentId;
   const requestId = buildRequestId(meter.eventSource, paymentId);
+  const { subject, attributable } = customerOf(payment, paymentId);
   const event: LlmUsageEvent = {
     request_id: requestId,
-    customer: customerOf(payment, paymentId),
+    customer: subject,
     model: model.id,
     provider: model.provider,
     input_tokens: tokens.inputTokens,
@@ -254,7 +271,11 @@ async function meterUsage(
     tokens: tokens.totalTokens,
   };
 
-  const result = await meter.record(event);
+  const result = await meter.record(event, {
+    // Register the customer only for a verified payer, and only when the
+    // operator has not taken customer management into their own hands.
+    ensureCustomer: attributable && config.openmeterAutoCreateCustomers,
+  });
   if (result.status === 'failed') {
     // Loud, but not fatal: the caller still gets the answer they paid for.
     log.warn('usage_metering_failed', {
@@ -268,7 +289,16 @@ async function meterUsage(
       requestId,
       model: model.id,
       tokens: event.tokens,
+      customer: subject,
+      customerStatus: result.customer?.status ?? 'not-attributed',
     });
+  }
+  // Attribution problems are worth their own line: the usage landed, but it
+  // will not reach a bill until the mapping is fixed.
+  if (result.customer !== undefined && result.customer.status === 'failed') {
+    log.warn('usage_customer_failed', { reason: result.customer.reason, customer: subject });
+  } else if (result.customer?.status === 'exists-unmapped') {
+    log.warn('usage_customer_unmapped', { customer: subject });
   }
   return result;
 }
@@ -283,6 +313,7 @@ export function createChatHandler(config: ServerConfig, log: Logger, fetchImpl?:
     baseUrl: config.openmeterUrl,
     apiKey: config.openmeterApiKey,
     eventsPath: config.openmeterEventsPath,
+    customersPath: config.openmeterCustomersPath,
     source: config.openmeterSource,
     timeoutMs: config.openmeterTimeoutMs,
     fetchImpl,

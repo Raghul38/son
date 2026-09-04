@@ -37,6 +37,27 @@
  * `{"message":"no Route matched with those values"}` for every path. Self
  * hosted OpenMeter uses `/api/v1/events` on its own host.
  *
+ * CUSTOMER ATTRIBUTION: OpenMeter only counts an event against a customer when
+ * some Customer entity claims its `subject`. An event whose subject nothing
+ * claims is still stored and still summed by the meter, but comes back with
+ * `validation_errors: [{ ..., "no customer found for event subject: …" }]` and
+ * is invisible to billing. So before the first event for a subject, this client
+ * upserts the customer:
+ *
+ *   POST <customers path>
+ *   { "name": <subject>, "key": <subject>,
+ *     "usage_attribution": { "subject_keys": [<subject>] } }
+ *
+ * 409 means the key is already taken — someone (an earlier process, or an
+ * operator in the Konnect UI) owns that customer. We then READ it back and
+ * report whether it actually claims our subject; we never overwrite an
+ * operator's attribution config. Verified live against the configured instance
+ * on 2026-09-04.
+ *
+ * The subject itself is the VERIFIED PAYER identity (see chat.ts): it comes
+ * from the facilitator's on-ledger verification, never from the request body,
+ * so a client cannot bill its usage to somebody else by asking.
+ *
  * IDEMPOTENCY: the CloudEvents `id` is the dedupe key, and it is derived from
  * the payment (see buildRequestId), never random. A duplicate payment or a
  * replayed request therefore carries the SAME id and cannot inflate usage —
@@ -86,10 +107,47 @@ export type MeteringStatus =
   /** OpenMeter rejected the event or was unreachable. */
   | 'failed';
 
+/** Outcome of making sure OpenMeter knows the customer behind a subject. */
+export type CustomerStatus =
+  /** Customer created for this subject by this call. */
+  | 'created'
+  /** A customer already claims this subject. */
+  | 'exists'
+  /** Already ensured by this process — no call made. */
+  | 'cached'
+  /**
+   * A customer already owns this key but does NOT claim this subject, so the
+   * usage will not be attributed. Left alone deliberately: overwriting an
+   * operator's attribution config would be worse than reporting the mismatch.
+   */
+  | 'exists-unmapped'
+  /** Metering is off, or customer upsert is disabled. */
+  | 'disabled'
+  /** OpenMeter rejected the upsert or was unreachable. */
+  | 'failed';
+
+export interface CustomerResult {
+  status: CustomerStatus;
+  /** Stable reason for 'failed'. Never contains the API key. */
+  reason?: string;
+}
+
 export interface MeteringResult {
   status: MeteringStatus;
   /** Stable reason for 'skipped' / 'failed'. Never contains the API key. */
   reason?: string;
+  /** Present when this call also tried to attribute the subject to a customer. */
+  customer?: CustomerResult;
+}
+
+/** Per-call knobs for {@link OpenMeterClient.record}. */
+export interface RecordOptions {
+  /**
+   * Upsert the OpenMeter customer for this event's subject first. Only pass
+   * true for a VERIFIED payer identity — one customer per unattributable
+   * payment would be noise, not billing.
+   */
+  ensureCustomer?: boolean;
 }
 
 export interface OpenMeterClientOptions {
@@ -99,6 +157,8 @@ export interface OpenMeterClientOptions {
   apiKey: string;
   /** Path appended to baseUrl. Default '/v3/openmeter/events'. */
   eventsPath?: string;
+  /** Path appended to baseUrl for customers. Default '/v3/openmeter/customers'. */
+  customersPath?: string;
   /** CloudEvents `source`. Default 'sonpay'. */
   source?: string;
   /** Hard deadline for the ingest call, ms. Default 5000. */
@@ -112,6 +172,7 @@ export interface OpenMeterClientOptions {
 }
 
 export const DEFAULT_OPENMETER_EVENTS_PATH = '/v3/openmeter/events';
+export const DEFAULT_OPENMETER_CUSTOMERS_PATH = '/v3/openmeter/customers';
 export const OPENMETER_EVENT_TYPE = 'kong.llm_request';
 
 /**
@@ -146,25 +207,45 @@ class RecentIds {
   }
 }
 
+/**
+ * Does a `GET /customers?key=…` response show a customer that actually claims
+ * this subject? Written defensively: an unrecognised body means "cannot
+ * confirm", never "yes".
+ */
+function claimsSubject(body: unknown, subject: string): boolean {
+  const data = (body as { data?: unknown } | undefined)?.data;
+  if (!Array.isArray(data)) return false;
+  return data.some((customer) => {
+    const keys = (customer as { usage_attribution?: { subject_keys?: unknown } })
+      ?.usage_attribution?.subject_keys;
+    return Array.isArray(keys) && keys.includes(subject);
+  });
+}
+
 export class OpenMeterClient {
   private readonly url: string;
+  private readonly customersUrl: string;
   private readonly apiKey: string;
   private readonly source: string;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => Date;
   private readonly sent: RecentIds;
+  private readonly customers: RecentIds;
 
   constructor(options: OpenMeterClientOptions) {
     const base = options.baseUrl.replace(/\/+$/, '');
-    const path = options.eventsPath ?? DEFAULT_OPENMETER_EVENTS_PATH;
-    this.url = base === '' ? '' : `${base}${path.startsWith('/') ? path : `/${path}`}`;
+    const join = (path: string) =>
+      base === '' ? '' : `${base}${path.startsWith('/') ? path : `/${path}`}`;
+    this.url = join(options.eventsPath ?? DEFAULT_OPENMETER_EVENTS_PATH);
+    this.customersUrl = join(options.customersPath ?? DEFAULT_OPENMETER_CUSTOMERS_PATH);
     this.apiKey = options.apiKey;
     this.source = options.source ?? 'sonpay';
     this.timeoutMs = options.timeoutMs ?? 5000;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.now = options.now ?? (() => new Date());
     this.sent = new RecentIds(options.dedupeCapacity ?? 10_000);
+    this.customers = new RecentIds(options.dedupeCapacity ?? 10_000);
   }
 
   /** True when both a URL and a key are configured. */
@@ -182,40 +263,112 @@ export class OpenMeterClient {
    * `await` it on the success path of a paid request without any risk of
    * turning a delivered answer into an error.
    */
-  async record(event: LlmUsageEvent): Promise<MeteringResult> {
+  async record(event: LlmUsageEvent, options: RecordOptions = {}): Promise<MeteringResult> {
     if (!this.enabled) return { status: 'disabled' };
     if (this.sent.has(event.request_id)) return { status: 'duplicate' };
 
+    // Attribution first: a customer that appears after its events does not
+    // retroactively claim them, so the mapping has to exist before the ingest.
+    // A failure here is reported, never fatal — unattributed usage still beats
+    // lost usage, and the mapping can be fixed and later events will attribute.
+    const customer = options.ensureCustomer === true
+      ? await this.ensureCustomer(event.customer)
+      : undefined;
+
+    const res = await this.send(this.url, {
+      method: 'POST',
+      headers: {
+        // OpenMeter accepts a single CloudEvent as application/cloudevents+json.
+        'Content-Type': 'application/cloudevents+json',
+        Authorization: `Bearer ${this.apiKey}`,
+      },
+      body: JSON.stringify(this.toCloudEvent(event)),
+    });
+
+    const withCustomer = (result: MeteringResult): MeteringResult =>
+      customer === undefined ? result : { ...result, customer };
+
+    if (!res.ok) {
+      // Body text can echo the request but never the Authorization header;
+      // still, only the status is kept so nothing unexpected reaches a log.
+      return withCustomer({ status: 'failed', reason: res.reason });
+    }
+    // Only remember ids OpenMeter actually accepted: an event we failed to
+    // deliver has not been counted, so a later retry must be allowed
+    // through (OpenMeter's own (source, id) dedupe covers the case where
+    // the request landed but the response did not reach us).
+    this.sent.add(event.request_id);
+    return withCustomer({ status: 'sent' });
+  }
+
+  /**
+   * Make sure some OpenMeter customer claims `subject`, so the usage about to
+   * be reported is attributed instead of landing as an orphan event.
+   *
+   * Idempotent by construction: the customer key IS the subject, so a repeat
+   * upsert collides on the key (409) rather than creating a second customer.
+   * Never throws, for the same reason `record` never throws.
+   */
+  async ensureCustomer(subject: string): Promise<CustomerResult> {
+    if (!this.enabled) return { status: 'disabled' };
+    if (this.customers.has(subject)) return { status: 'cached' };
+
+    const created = await this.send(this.customersUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.apiKey}`,
+      },
+      body: JSON.stringify({
+        name: subject,
+        key: subject,
+        usage_attribution: { subject_keys: [subject] },
+      }),
+    });
+    if (created.ok) {
+      this.customers.add(subject);
+      return { status: 'created' };
+    }
+    if (created.status !== 409) {
+      return { status: 'failed', reason: created.reason };
+    }
+
+    // The key is taken. Read the owner back rather than assuming — and rather
+    // than overwriting whatever attribution an operator configured by hand.
+    const existing = await this.send(
+      `${this.customersUrl}?key=${encodeURIComponent(subject)}`,
+      { method: 'GET', headers: { Authorization: `Bearer ${this.apiKey}` } },
+      true
+    );
+    if (!existing.ok) return { status: 'failed', reason: existing.reason };
+    if (!claimsSubject(existing.body, subject)) return { status: 'exists-unmapped' };
+    this.customers.add(subject);
+    return { status: 'exists' };
+  }
+
+  /**
+   * One HTTP call with this client's deadline, reduced to a plain verdict.
+   * Rejections, aborts and error statuses all come back as data so no caller
+   * has to guard a paid request with a try/catch.
+   */
+  private async send(
+    url: string,
+    init: RequestInit,
+    parseBody = false
+  ): Promise<{ ok: boolean; status: number; reason?: string; body?: unknown }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      const res = await this.fetchImpl(this.url, {
-        method: 'POST',
-        headers: {
-          // OpenMeter accepts a single CloudEvent as application/cloudevents+json.
-          'Content-Type': 'application/cloudevents+json',
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify(this.toCloudEvent(event)),
-        signal: controller.signal,
-      });
-      if (!res.ok) {
-        // Body text can echo the request but never the Authorization header;
-        // still, only the status is kept so nothing unexpected reaches a log.
-        return { status: 'failed', reason: `http-${res.status}` };
-      }
-      // Only remember ids OpenMeter actually accepted: an event we failed to
-      // deliver has not been counted, so a later retry must be allowed
-      // through (OpenMeter's own (source, id) dedupe covers the case where
-      // the request landed but the response did not reach us).
-      this.sent.add(event.request_id);
-      return { status: 'sent' };
+      const res = await this.fetchImpl(url, { ...init, signal: controller.signal });
+      if (!res.ok) return { ok: false, status: res.status, reason: `http-${res.status}` };
+      const body = parseBody ? await res.json().catch(() => undefined) : undefined;
+      return { ok: true, status: res.status, body };
     } catch (err) {
       const aborted =
-        controller.signal.aborted ||
-        (err as { name?: unknown })?.name === 'AbortError';
+        controller.signal.aborted || (err as { name?: unknown })?.name === 'AbortError';
       return {
-        status: 'failed',
+        ok: false,
+        status: 0,
         reason: aborted ? `timeout-${this.timeoutMs}ms` : 'transport-error',
       };
     } finally {

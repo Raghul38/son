@@ -17,10 +17,42 @@ import { Express } from 'express';
 import request from 'supertest';
 import { createApp } from '../src/server';
 import { loadConfig, ServerConfig } from '../src/config';
+import {
+  Facilitator,
+  PaymentRequest,
+  PaymentVerification,
+  SubmittedPayment,
+} from '../src/facilitator/facilitator';
 import { MockFacilitator } from '../src/facilitator/mock-facilitator';
 import { X_PAYMENT_HEADER, X402Challenge } from '../src/x402';
 
 const METER_URL = 'https://meter.test';
+
+/** The XRPL account a real facilitator would report as having paid. */
+const PAYER = 'rPayerAddr1234567890abcdefghijklmn';
+
+/**
+ * A facilitator that attributes payments, like QuickNode (tx sender) and T54
+ * (`payer`) do. The mock facilitator deliberately cannot, so this is the only
+ * way to exercise the attributed path over HTTP.
+ */
+class AttributingFacilitator implements Facilitator {
+  readonly name = 'attributing';
+  private readonly inner = new MockFacilitator();
+
+  createPaymentRequest(options: Parameters<Facilitator['createPaymentRequest']>[0]) {
+    return this.inner.createPaymentRequest(options);
+  }
+
+  async verifyPayment(
+    payment: SubmittedPayment,
+    paymentRequest: PaymentRequest
+  ): Promise<PaymentVerification> {
+    const verification = await this.inner.verifyPayment(payment, paymentRequest);
+    if (!verification.valid) return verification;
+    return { ...verification, paymentId: `tx-${paymentRequest.nonce}`, payer: PAYER };
+  }
+}
 
 const BASE = {
   paymentReceiver: 'rMOCKRECEIVERaddress00000000000000000',
@@ -38,6 +70,18 @@ const BASE = {
 function buildApp(overrides: Partial<ServerConfig> = {}, fetchImpl?: typeof fetch): Express {
   return createApp({
     facilitator: new MockFacilitator(),
+    config: loadConfig({ ...BASE, ...overrides }),
+    fetchImpl,
+  });
+}
+
+/** The same app, but behind a facilitator that names the payer. */
+function buildAttributedApp(
+  overrides: Partial<ServerConfig> = {},
+  fetchImpl?: typeof fetch
+): Express {
+  return createApp({
+    facilitator: new AttributingFacilitator(),
     config: loadConfig({ ...BASE, ...overrides }),
     fetchImpl,
   });
@@ -65,11 +109,21 @@ type Reply = Response | ((init?: RequestInit) => Response | Promise<Response>);
  * was called, which is how "a metering failure must not re-run the request"
  * is checked.
  */
-function splitFetch(replies: { llm?: Reply; meter?: Reply } = {}) {
+function splitFetch(replies: { llm?: Reply; meter?: Reply; customer?: Reply } = {}) {
   const llmCalls: RequestInit[] = [];
   const meterCalls: { headers: Record<string, string>; body: Record<string, unknown> }[] = [];
+  const customerCalls: { url: string; body: Record<string, unknown> }[] = [];
 
   const fetchImpl = (async (url: string, init?: RequestInit) => {
+    if (String(url).startsWith(`${METER_URL}/v3/openmeter/customers`)) {
+      customerCalls.push({
+        url: String(url),
+        body: JSON.parse(String(init?.body ?? '{}')),
+      });
+      const reply =
+        replies.customer ?? new Response(JSON.stringify({ id: '01ABC' }), { status: 201 });
+      return typeof reply === 'function' ? reply(init) : reply;
+    }
     if (String(url).startsWith(METER_URL)) {
       meterCalls.push({
         headers: (init?.headers ?? {}) as Record<string, string>,
@@ -83,7 +137,7 @@ function splitFetch(replies: { llm?: Reply; meter?: Reply } = {}) {
     return typeof reply === 'function' ? reply(init) : reply;
   }) as unknown as typeof fetch;
 
-  return { fetchImpl, llmCalls, meterCalls };
+  return { fetchImpl, llmCalls, meterCalls, customerCalls };
 }
 
 /** Step 1 of the x402 handshake: get a challenge and build the header value. */
@@ -197,6 +251,91 @@ describe('usage metering — the event that reaches OpenMeter', () => {
     expect(res.status).toBe(200);
     expect(res.body.stub).toBe(true);
     expect(meterCalls).toHaveLength(0);
+  });
+});
+
+describe('usage metering — customer attribution', () => {
+  it('bills the verified payer, and registers it as a customer first', async () => {
+    const { fetchImpl, meterCalls, customerCalls } = splitFetch();
+    const res = await paidChat(buildAttributedApp({}, fetchImpl));
+
+    expect(res.status).toBe(200);
+    expect(res.body.metering).toEqual({ status: 'sent', customer: { status: 'created' } });
+
+    expect(customerCalls).toHaveLength(1);
+    expect(customerCalls[0].url).toBe(`${METER_URL}/v3/openmeter/customers`);
+    expect(customerCalls[0].body).toEqual({
+      name: PAYER,
+      key: PAYER,
+      usage_attribution: { subject_keys: [PAYER] },
+    });
+
+    // The event's subject is what the customer claims — that is the whole
+    // point of the upsert, and the reason an event is not an orphan.
+    expect(meterCalls[0].body.subject).toBe(PAYER);
+    expect((meterCalls[0].body.data as Record<string, unknown>).customer).toBe(PAYER);
+  });
+
+  it('ignores a customer the client asks to be billed as', async () => {
+    // Attribution is server-derived. If a request body could pick the
+    // customer, anyone could charge their tokens to someone else.
+    const { fetchImpl, meterCalls, customerCalls } = splitFetch();
+    const app = buildAttributedApp({}, fetchImpl);
+    const payload = { ...HELLO, customer: 'rVictimAccount', subject: 'rVictimAccount' };
+    await withPayment(app, await payFor(app, payload), payload).expect(200);
+
+    expect(meterCalls[0].body.subject).toBe(PAYER);
+    expect(customerCalls[0].body.key).toBe(PAYER);
+    expect(JSON.stringify(meterCalls[0])).not.toContain('rVictimAccount');
+  });
+
+  it('registers a payer once, not once per request', async () => {
+    const { fetchImpl, customerCalls } = splitFetch();
+    const app = buildAttributedApp({}, fetchImpl);
+
+    await paidChat(app);
+    const second = await paidChat(app);
+
+    expect(second.body.metering).toEqual({ status: 'sent', customer: { status: 'cached' } });
+    expect(customerCalls).toHaveLength(1);
+  });
+
+  it('does not invent a customer for a payment nobody can attribute', async () => {
+    // The mock facilitator names no payer, so the subject is the payment
+    // itself — real and stable, but not a billable identity.
+    const { fetchImpl, meterCalls, customerCalls } = splitFetch();
+    const res = await paidChat(buildApp({}, fetchImpl));
+
+    expect(res.body.metering).toEqual({ status: 'sent' });
+    expect(customerCalls).toHaveLength(0);
+    expect(String(meterCalls[0].body.subject)).toMatch(/^payment:/);
+  });
+
+  it('leaves the customer list alone when auto-creation is off', async () => {
+    // Operators who manage customers in the Konnect UI get exactly that:
+    // usage still reported, nothing written to their customer list.
+    const { fetchImpl, meterCalls, customerCalls } = splitFetch();
+    const res = await paidChat(
+      buildAttributedApp({ openmeterAutoCreateCustomers: false }, fetchImpl)
+    );
+
+    expect(res.body.metering).toEqual({ status: 'sent' });
+    expect(customerCalls).toHaveLength(0);
+    expect(meterCalls[0].body.subject).toBe(PAYER);
+  });
+
+  it('still reports usage when the customer upsert fails', async () => {
+    const { fetchImpl, meterCalls } = splitFetch({
+      customer: () => new Response('nope', { status: 500 }),
+    });
+    const res = await paidChat(buildAttributedApp({}, fetchImpl));
+
+    expect(res.status).toBe(200);
+    expect(res.body.metering).toEqual({
+      status: 'sent',
+      customer: { status: 'failed', reason: 'http-500' },
+    });
+    expect(meterCalls).toHaveLength(1);
   });
 });
 
