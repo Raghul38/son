@@ -21,6 +21,9 @@ export * from './facilitator/quicknode-facilitator';
 export * from './facilitator/t54-facilitator';
 export * from './chat';
 export * from './model-stub';
+export * from './activity';
+export * from './api';
+export * from './catalog';
 
 /**
  * Build the facilitator from environment-provided configuration.

@@ -130,6 +130,32 @@ function adapterFor(provider: string, config: ServerConfig): ProviderCall | unde
   }
 }
 
+/**
+ * Why a provider can or cannot be called right now.
+ *   live            -> adapter wired AND credentials present
+ *   no-credentials  -> adapter wired, but nobody configured a key
+ *   no-adapter      -> this server has no way to call the provider at all
+ */
+export type ProviderSupport = 'live' | 'no-credentials' | 'no-adapter';
+
+/**
+ * Answer that question for one provider, WITHOUT restating `adapterFor`'s
+ * rules: the second probe re-asks the same switch with credentials filled in,
+ * so "unconfigured" and "unsupported" can never disagree with dispatch.
+ *
+ * Read-only — the catalog endpoint uses it to say which models are live.
+ */
+export function providerSupport(provider: string, config: ServerConfig): ProviderSupport {
+  if (adapterFor(provider, config) !== undefined) return 'live';
+  const withCredentials: ServerConfig = {
+    ...config,
+    llmApiKey: 'probe',
+    nvidiaApiKey: 'probe',
+    ovhApiKey: 'probe',
+  };
+  return adapterFor(provider, withCredentials) !== undefined ? 'no-credentials' : 'no-adapter';
+}
+
 /** Providers this server can actually call right now (adapter + credentials). */
 function configuredProviders(config: ServerConfig): readonly string[] {
   return Array.from(new Set(MODEL_TABLE.map((m) => m.provider))).filter(

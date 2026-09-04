@@ -5,12 +5,15 @@
  * every chat request is payment-gated. Facilitator and config are injected so
  * tests can pass a MockFacilitator and assert on the 402 flow deterministically.
  */
+import path from 'path';
 import express, { Express, NextFunction, Request, Response } from 'express';
 import { Facilitator } from './facilitator/facilitator';
 import { ServerConfig } from './config';
 import { Logger } from './logger';
 import { x402PaymentMiddleware } from './x402';
 import { createChatHandler } from './chat';
+import { ActivityLog, activityRecorder } from './activity';
+import { createConsoleApi } from './api';
 
 export interface AppDeps {
   facilitator: Facilitator;
@@ -23,6 +26,11 @@ export interface AppDeps {
    * Node's global fetch.
    */
   fetchImpl?: typeof fetch;
+  /**
+   * Request ledger the console reads. Injectable so a test can pre-seed it or
+   * assert on it directly; one is created per app otherwise.
+   */
+  ledger?: ActivityLog;
 }
 
 /** Assemble and return the Express app (does not listen). Tests use this. */
@@ -39,14 +47,37 @@ export function createApp(deps: AppDeps): Express {
     next();
   });
 
+  const ledger = deps.ledger ?? new ActivityLog(deps.config.activityRetention);
+
   // TODO(real-facilitator): exchange the mock for the t54 hosted XRPL
   // facilitator (XRPL_FACILITATOR_URL / XRPL_NETWORK from env). The
   // Facilitator interface is the seam; see createFacilitator() in index.ts.
+  //
+  // The recorder runs FIRST so a 402 is recorded too — "payment required" and
+  // "payment rejected" are results the console has to show. It only observes.
   app.post(
     '/v1/chat',
+    activityRecorder(ledger, deps.config),
     x402PaymentMiddleware(deps.facilitator, deps.config, log),
     createChatHandler(deps.config, log, deps.fetchImpl)
   );
+
+  // Read-only console API (catalog, public config, request ledger).
+  app.use(createConsoleApi({ config: deps.config, ledger, facilitatorName: deps.facilitator.name }));
+
+  // Optionally serve the built console (packages/web/dist) from this same
+  // origin, so a deployment is one process and the browser needs no CORS.
+  // Unset by default: `npm run dev` uses Vite's dev server and its proxy.
+  if (deps.config.webDist !== '') {
+    const root = path.resolve(deps.config.webDist);
+    app.use(express.static(root));
+    // SPA fallback for client-side routes only. API paths and every non-GET
+    // request fall through to the 404 below, so a typo in an endpoint still
+    // reads as a 404 instead of silently returning HTML.
+    app.get(/^(?!\/v1\/).*/, (_req: Request, res: Response) => {
+      res.sendFile(path.join(root, 'index.html'));
+    });
+  }
 
   // 404 for unknown routes.
   app.use((_req: Request, res: Response) => {

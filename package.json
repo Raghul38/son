@@ -7,8 +7,11 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @xrppay/router-core && npm run build -w @xrppay/server",
-    "test": "npm run build && npm run test --workspaces --if-present"
+    "build": "npm run build -w @xrppay/router-core && npm run build -w @xrppay/server && npm run build -w @xrppay/web",
+    "test": "npm run build && npm run test --workspaces --if-present",
+    "start": "node packages/server/dist/index.js",
+    "dev:server": "node packages/server/dist/index.js",
+    "dev:web": "npm run dev -w @xrppay/web"
   },
   "engines": {
     "node": ">=22"

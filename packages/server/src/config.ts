@@ -179,6 +179,18 @@ export interface ServerConfig {
    * cost". Only applied to requests we can actually cost — see src/pricing.ts.
    */
   platformMarkupBps: number;
+  /**
+   * How many recent `/v1/chat` requests the in-memory console ledger keeps
+   * (ACTIVITY_RETENTION, default 500). It is a rolling window, not billing
+   * history — OpenMeter holds the durable record.
+   */
+  activityRetention: number;
+  /**
+   * Directory of the built console to serve from this same origin
+   * (WEB_DIST, e.g. "packages/web/dist"). Empty (the default) serves the API
+   * only; in development the Vite dev server proxies to it instead.
+   */
+  webDist: string;
 }
 
 function env(name: string): string | undefined {
@@ -324,6 +336,8 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     openmeterSource: env('OPENMETER_SOURCE') ?? 'sonpay',
     openmeterTimeoutMs: parsePositiveInt(env('OPENMETER_TIMEOUT_MS'), 5000),
     platformMarkupBps: parseNonNegativeInt(env('PLATFORM_MARKUP_BPS'), 500),
+    activityRetention: parsePositiveInt(env('ACTIVITY_RETENTION'), 500),
+    webDist: env('WEB_DIST') ?? '',
   };
   return { ...config, ...overrides };
 }

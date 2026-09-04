@@ -547,6 +547,63 @@ else is reported honestly instead of guessed — the response carries
 `pricing` object. Such a request is still metered: unknown price does not mean
 unknown usage.
 
+## The console (web frontend)
+
+`packages/web` is a Vite + React + TypeScript single-page console for the
+gateway. It is a **client of this API and nothing else**: it does not import
+server code, it holds no state of its own, and it cannot change payment,
+routing, metering or provider behaviour. Every number it shows came from an
+endpoint below — when the gateway does not publish something, the page says so
+instead of inventing it.
+
+| Page | What it is for |
+|---|---|
+| `/` | Landing: what the gateway is, the live price per request, which models are callable right now |
+| `/dashboard` | Every request the gateway has handled — outcome, model, provider, tokens, provider cost, platform fee, payment status, latency |
+| `/models` | The model catalog: provider, capabilities, both per-token rates, context window, availability, free/paid |
+| `/payments` | Every x402 payment presented — asset, amount, transaction hash (linked to the ledger explorer), payer, status |
+| `/usage` | Input / output / total tokens per request, the request id the meter deduplicates on, and whether the event reached OpenMeter |
+| `/quickstart` | The endpoint, the documented 402 handshake, and a playground that runs the real handshake against this gateway |
+| `/keys` | Honest by design: this gateway issues no API keys, and the create form prints the real `501` rather than minting one |
+
+### The endpoints it reads
+
+These were added for the console. They are **additive and read-only** — the
+x402 middleware, the router, the provider adapters and the OpenMeter reporter
+are untouched, and none of these paths can spend money or serve a model.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /v1/config` | Public configuration: network, asset, price per request, receiver, facilitator name, routing strategy, markup. Never a secret |
+| `GET /v1/models` | The model catalog with per-provider availability and why a provider is not callable (`no credentials` vs `no adapter`) |
+| `GET /v1/activity?limit=` | The recent-request ledger plus its summary totals |
+| `GET /v1/payments?limit=` | The same ledger projected onto its payments |
+| `GET /v1/keys` | `{"supported": false}` — and `POST /v1/keys` / `DELETE /v1/keys/:id` answer `501` |
+
+The ledger behind `/v1/activity` and `/v1/payments` is a bounded in-memory ring
+(`ACTIVITY_RETENTION`, default 500 requests) written by a middleware that sits
+**in front of** the x402 middleware, so a 402 is recorded as the request it is.
+It is a rolling window for the dashboard, cleared on restart — OpenMeter holds
+the durable usage record.
+
+### Running it
+
+In development the console runs on Vite and proxies `/v1` and `/healthz` to the
+gateway, so there is no CORS to configure:
+
+```bash
+npm run build                      # router-core, then server, then the console
+npm run dev:server                 # gateway on $PORT (default 8080)
+VITE_API_TARGET=http://127.0.0.1:8080 npm run dev:web   # console on :3000
+```
+
+In production, point `WEB_DIST` at the built assets and the gateway serves the
+console itself, from the same origin as the API:
+
+```bash
+WEB_DIST=packages/web/dist npm start
+```
+
 ## Environment variables
 
 | Variable | Default | Meaning |
@@ -579,6 +636,9 @@ unknown usage.
 | `OPENMETER_SOURCE` | `sonpay` | CloudEvents `source`; also namespaces the event id, which is what deduplicates a replayed payment |
 | `OPENMETER_TIMEOUT_MS` | `5000` | Deadline for one ingest call — a slow meter never holds up a paid answer |
 | `PLATFORM_MARKUP_BPS` | `500` | Markup on the provider's cost in basis points (`500` = 5%). `0` is legal: cost with no fee |
+| `ACTIVITY_RETENTION` | `500` | Requests the console's in-memory ledger keeps (`/v1/activity`, `/v1/payments`). A rolling window, not a billing record |
+| `WEB_DIST` | *(empty)* | Directory of built console assets for the gateway to serve (e.g. `packages/web/dist`). Empty = API only, which is what you want when Vite serves the console in dev |
+| `VITE_API_TARGET` | `http://127.0.0.1:8080` | Dev only, read by `packages/web/vite.config.ts`: where the Vite dev server proxies `/v1` and `/healthz` |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
 
 (`XRPL_FACILITATOR_URL` from earlier docs is deprecated: the current design
@@ -592,7 +652,9 @@ excludes it.
 
 ```bash
 npm test          # build + run all Jest suites across workspaces
-npm run build     # builds router-core first, then server (order matters)
+npm run build     # router-core, then server, then the console (order matters)
+npm run dev:server  # gateway from packages/server/dist
+npm run dev:web     # console on :3000, proxying to $VITE_API_TARGET
 ```
 
 Tests use injected fakes (mock facilitator, injectable fetch) — nothing touches
@@ -608,6 +670,7 @@ the network.
 6. [~] RLUSD support (same verification path, unit-tested + env-driven flow; live testnet smoke test pending — needs operator testnet RLUSD funds, see "Smoke-test on testnet — RLUSD")
 7. [x] Usage ledger — per-request token usage reported to OpenMeter as `kong.llm_request` (idempotent per payment; failures never re-run the model)
 8. [x] Platform fee/markup on each request (`PLATFORM_MARKUP_BPS`, default 5%; unpriced models are metered, never guessed)
+9. [x] Web console — landing, dashboard, models, payments, usage, quickstart playground and keys, on additive read-only endpoints (`packages/web`)
 
 ## License
 
