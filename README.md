@@ -499,6 +499,25 @@ customer per payment would be noise, not billing.
 - **A client cannot pick who gets billed.** The customer comes from the
   facilitator's verification, never from the request body.
 
+### Verified against the live meter
+
+One real paid request on 2026-09-04 — XRPL testnet payment
+`5A236CCE…4AECF7A` verified by `QuickNodeFacilitator`, answered by
+`Meta-Llama-3_3-70B-Instruct`, 43 tokens — against
+`https://in.api.konghq.com/v3/openmeter/events`:
+
+- the event was accepted (`202`) and came back from `GET /v3/openmeter/events`
+  linked to `customer.id` `01M1NZ8G0DYKXZJTC9VEFYP6KY`, **with no
+  `validation_errors`** (an earlier unattributed event on the same instance
+  still carries `no customer found for event subject`);
+- `POST /v3/openmeter/meters/llm_tokens_total/query` went `262` → `305`, exactly
+  `+43`;
+- the customer list holds one entry, `key` = `name` =
+  `rsHzeudMpRr1rdJqPWqcjNi3Z8khCvMBBQ` = the payer that signed the transaction,
+  with `usage_attribution.subject_keys` claiming that same subject;
+- re-posting the byte-identical CloudEvent returned `202` and left the meter at
+  `305`.
+
 ### The fee
 
 ```
