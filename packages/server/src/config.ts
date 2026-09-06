@@ -12,7 +12,26 @@ import {
   DEFAULT_OPENMETER_EVENTS_PATH,
 } from './usage/openmeter';
 
+/** CAIP-2 network id of XRPL Mainnet — real funds. */
+export const XRPL_MAINNET = 'xrpl:0';
+/** CAIP-2 network id of XRPL Testnet — free test funds. */
+export const XRPL_TESTNET = 'xrpl:1';
+
+/**
+ * Which deployment this is. "production" is the only value that may talk to
+ * XRPL Mainnet, and it switches on the safety rules in src/mainnet.ts.
+ */
+export type SonpayEnvironment = 'development' | 'production';
+
 export interface ServerConfig {
+  /**
+   * Deployment environment (SONPAY_ENV): "development" (default) or
+   * "production". When unset it is DERIVED from XRPL_NETWORK, so pointing a
+   * server at mainnet turns the production rules on rather than off. A
+   * declared value that disagrees with the network is a startup error — see
+   * `assertProductionSafety()`.
+   */
+  environment: SonpayEnvironment;
   /** Port to listen on. Default 8080 (not 3000 — that is the site's port). */
   port: number;
   /** Host to bind. Default 0.0.0.0 so the server is reachable outside loopback. */
@@ -235,6 +254,35 @@ function parseLogLevel(value: string | undefined): ServerConfig['logLevel'] {
   }
 }
 
+/**
+ * Parse SONPAY_ENV. Unlike the other selectors this one THROWS on an
+ * unrecognised value instead of falling back: "SONPAY_ENV=prd" silently
+ * meaning "development" would disable every mainnet safety rule.
+ *
+ * When unset, the environment is derived from the network so that
+ * XRPL_NETWORK=xrpl:0 alone is enough to be treated as production.
+ */
+function parseEnvironment(value: string | undefined, network: string): SonpayEnvironment {
+  switch ((value ?? '').toLowerCase()) {
+    case '':
+      return network === XRPL_MAINNET ? 'production' : 'development';
+    case 'production':
+    case 'prod':
+    case 'mainnet':
+      return 'production';
+    case 'development':
+    case 'dev':
+    case 'local':
+    case 'test':
+      return 'development';
+    default:
+      throw new Error(
+        `Invalid SONPAY_ENV="${value}". Use "production" or "development" ` +
+          '(leave it unset to derive it from XRPL_NETWORK).'
+      );
+  }
+}
+
 /** Parse the payment facilitator selector; unknown values fall back to "mock". */
 function parsePaymentFacilitator(value: string | undefined): ServerConfig['paymentFacilitator'] {
   switch (value) {
@@ -300,11 +348,13 @@ function parseBoolDefaultTrue(value: string | undefined): boolean {
 
 /** Load configuration from process.env. Throws if a required var is missing. */
 export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
+  const network = requireEnv('XRPL_NETWORK', XRPL_TESTNET);
   const config: ServerConfig = {
+    environment: parseEnvironment(env('SONPAY_ENV'), network),
     port: parsePort(env('PORT'), 8080),
     host: env('HOST') ?? '0.0.0.0',
     facilitatorUrl: requireEnv('XRPL_FACILITATOR_URL', ''),
-    network: requireEnv('XRPL_NETWORK', 'xrpl:1'),
+    network,
     paymentReceiver: requireEnv('PAYMENT_RECEIVER', ''),
     rewardDrops: requireEnv('PAYMENT_REWARD_DROPS', '1000000'),
     paymentFacilitator: parsePaymentFacilitator(env('PAYMENT_FACILITATOR')),

@@ -15,6 +15,7 @@ import { Request, RequestHandler, Response, Router } from 'express';
 import { ActivityLog, toPaymentRecords } from './activity';
 import { buildCatalog, buildProviders } from './catalog';
 import { ServerConfig } from './config';
+import { isMainnet, networkLabel } from './mainnet';
 
 /** How many rows a list endpoint returns when the caller does not say. */
 const DEFAULT_LIMIT = 100;
@@ -30,15 +31,27 @@ function parseLimit(value: unknown, max: number): number {
 export function publicConfig(config: ServerConfig, facilitatorName: string) {
   return {
     endpoints: { chat: '/v1/chat' },
+    /** "production" means this gateway is settling on XRPL Mainnet. */
+    environment: config.environment,
     payment: {
       scheme: 'x402',
       network: config.network,
+      /** Display name of the network, so the console never has to guess. */
+      networkLabel: networkLabel(config.network),
+      /** True on XRPL Mainnet: payments here are real money. */
+      mainnet: isMainnet(config.network),
       asset: config.paymentAsset,
       /** XRP drops, or the IOU value for an issued currency. */
       amount: config.rewardDrops,
       receiver: config.paymentReceiver,
       ...(config.paymentAsset !== 'XRP' && { issuer: config.rlusdIssuer }),
       facilitator: facilitatorName,
+      /**
+       * True when payments are verified on the real ledger. The mock
+       * facilitator is the only thing that makes this false — and it cannot
+       * run in production at all (see src/mainnet.ts).
+       */
+      live: facilitatorName !== 'mock-facilitator',
       /** How the payer binds an on-ledger payment to a challenge. */
       binding: 'memo',
       header: 'X-PAYMENT',

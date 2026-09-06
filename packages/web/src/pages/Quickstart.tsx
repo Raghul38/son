@@ -11,7 +11,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, chat, type ChatResponse, type PaymentTerms, type X402Challenge } from '../api';
-import { amount, hexMemo, tokens, usd, useApi } from '../hooks';
+import { amount, explorerTx, hexMemo, tokens, usd, useApi } from '../hooks';
 import { Badge, Card, Code, ErrorNote, Mono, PageHead, Table } from '../components/ui';
 
 const DEFAULT_PROMPT = 'In one sentence: what is the XRP Ledger?';
@@ -34,9 +34,15 @@ export function Quickstart() {
   const [txHash, setTxHash] = useState('');
   const [answer, setAnswer] = useState<ChatResponse | undefined>();
   const [status, setStatus] = useState<number | undefined>();
+  /** The on-ledger hash that actually unlocked the answer, if there was one. */
+  const [settledTx, setSettledTx] = useState<string | undefined>();
   const [failure, setFailure] = useState<string | undefined>();
 
-  const isMock = config.data?.payment.facilitator === 'mock-facilitator';
+  // The server tells us whether payments are verified on the real ledger.
+  // `live` is false only for the mock facilitator, which a mainnet gateway
+  // refuses to start with — so the simulate button can never appear there.
+  const isMock = config.data?.payment.live === false;
+  const isMainnet = config.data?.payment.mainnet === true;
   const body = { messages: [{ role: 'user', content: prompt }] };
   const origin = window.location.origin;
 
@@ -47,6 +53,7 @@ export function Quickstart() {
     setStatus(undefined);
     setFailure(undefined);
     setTxHash('');
+    setSettledTx(undefined);
   };
 
   /** Step 1: the unpaid request, which is supposed to fail with a 402. */
@@ -109,6 +116,7 @@ export function Quickstart() {
 
   const payWithHash = () => {
     if (challenge === undefined || txHash.trim() === '') return;
+    setSettledTx(txHash.trim());
     void submitPayment(
       JSON.stringify({ txHash: txHash.trim(), payment: challenge.payment })
     );
@@ -116,6 +124,7 @@ export function Quickstart() {
 
   const payWithMock = () => {
     if (challenge === undefined) return;
+    setSettledTx(undefined);
     void submitPayment(
       JSON.stringify({
         nonce: challenge.token,
@@ -127,6 +136,10 @@ export function Quickstart() {
 
   const terms: PaymentTerms | undefined = challenge?.payment;
   const content = answer?.content;
+  const explorerUrl =
+    settledTx !== undefined && config.data !== undefined
+      ? explorerTx(config.data.payment.network, settledTx)
+      : undefined;
 
   return (
     <div className="page">
@@ -172,10 +185,12 @@ export function Quickstart() {
           <tr>
             <td>Network</td>
             <td>
+              {config.data?.payment.networkLabel ?? '—'}{' '}
               <Mono>{config.data?.payment.network}</Mono>{' '}
               <span className="muted small">
                 verified by {config.data?.payment.facilitator}
                 {isMock && ' — a local mock, not the ledger'}
+                {isMainnet && ' — payments are real XRP'}
               </span>
             </td>
           </tr>
@@ -369,6 +384,16 @@ Content-Type: application/vnd+http.x402.challenge+json
               </tr>
             </Table>
 
+            {isMainnet && (
+              <div className="note note-warn">
+                <p>
+                  This is <strong>{config.data?.payment.networkLabel}</strong>. Sending the amount
+                  above moves <strong>real {terms.asset ?? 'XRP'}</strong> from your wallet, and it
+                  cannot be undone. Check the destination and the memo before you sign.
+                </p>
+              </div>
+            )}
+
             <p className="muted small">
               Pay from any XRPL wallet — Xaman, Crossmark, GemWallet, or the{' '}
               <Mono>xrpl</Mono> library. Sonpay never asks for a seed, a private key or a wallet
@@ -434,6 +459,28 @@ Content-Type: application/vnd+http.x402.challenge+json
             {content !== undefined && <blockquote className="answer">{content}</blockquote>}
 
             <Table head={['', '']}>
+              <tr>
+                <td>Payment</td>
+                <td>
+                  {settledTx === undefined ? (
+                    <span className="muted">
+                      accepted by {config.data?.payment.facilitator}
+                      {isMock && ' — simulated, nothing was settled on-ledger'}
+                    </span>
+                  ) : (
+                    <>
+                      <Badge tone="ok">verified on-ledger</Badge>{' '}
+                      {explorerUrl !== undefined ? (
+                        <a href={explorerUrl} target="_blank" rel="noreferrer">
+                          <Mono>{settledTx}</Mono>
+                        </a>
+                      ) : (
+                        <Mono>{settledTx}</Mono>
+                      )}
+                    </>
+                  )}
+                </td>
+              </tr>
               <tr>
                 <td>Model</td>
                 <td>

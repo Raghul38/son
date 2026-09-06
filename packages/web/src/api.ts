@@ -49,14 +49,22 @@ export interface ModelsResponse {
 
 export interface PublicConfig {
   endpoints: { chat: string };
+  /** "production" means the gateway is settling on XRPL Mainnet — real money. */
+  environment: 'production' | 'development';
   payment: {
     scheme: string;
     network: string;
+    /** Display name of the network, e.g. "XRPL Mainnet". Sent by the server. */
+    networkLabel: string;
+    /** True on XRPL Mainnet. */
+    mainnet: boolean;
     asset: string;
     amount: string;
     receiver: string;
     issuer?: string;
     facilitator: string;
+    /** False only for the mock facilitator, which verifies nothing on-ledger. */
+    live: boolean;
     binding: string;
     header: string;
   };

@@ -3,7 +3,7 @@
  * gateway has been shown, straight from `/v1/payments`.
  */
 import { api, type PaymentRecord } from '../api';
-import { amount, shorten, time, tokens, usd, useApi } from '../hooks';
+import { amount, explorerTx, shorten, time, tokens, usd, useApi } from '../hooks';
 import {
   Badge,
   Card,
@@ -21,13 +21,6 @@ function statusBadge(status: PaymentRecord['status']) {
   if (status === 'verified') return <Badge tone="ok">verified on-ledger</Badge>;
   if (status === 'rejected') return <Badge tone="bad">rejected</Badge>;
   return <Badge tone="neutral">challenge issued</Badge>;
-}
-
-/** Link a hash to a public explorer, but only for a network we can name. */
-function explorer(network: string, txHash: string): string | undefined {
-  if (network === 'xrpl:1') return `https://testnet.xrpl.org/transactions/${txHash}`;
-  if (network === 'xrpl:0') return `https://livenet.xrpl.org/transactions/${txHash}`;
-  return undefined;
 }
 
 export function Payments() {
@@ -66,7 +59,7 @@ export function Payments() {
                   ? amount(String(settled), config.data.payment.asset)
                   : String(settled)
               }
-              hint={config.data?.payment.network}
+              hint={config.data?.payment.networkLabel}
             />
             <Stat
               label="Rejected"
@@ -106,7 +99,7 @@ export function Payments() {
                   ]}
                 >
                   {rows.map((p) => {
-                    const url = p.txHash !== undefined ? explorer(p.network, p.txHash) : undefined;
+                    const url = p.txHash !== undefined ? explorerTx(p.network, p.txHash) : undefined;
                     return (
                       <tr key={p.id}>
                         <td className="nowrap">{time(p.at)}</td>

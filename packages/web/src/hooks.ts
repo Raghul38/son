@@ -85,6 +85,16 @@ export function shorten(value: string | undefined, head = 8, tail = 6): string {
   return value.length <= head + tail + 1 ? value : `${value.slice(0, head)}…${value.slice(-tail)}`;
 }
 
+/**
+ * Public explorer URL for a transaction, but only on a network we can name:
+ * a wrong explorer link is worse than no link.
+ */
+export function explorerTx(network: string, txHash: string): string | undefined {
+  if (network === 'xrpl:1') return `https://testnet.xrpl.org/transactions/${txHash}`;
+  if (network === 'xrpl:0') return `https://livenet.xrpl.org/transactions/${txHash}`;
+  return undefined;
+}
+
 /** Hex-encode a nonce for an XRPL memo, the way the facilitator reads it. */
 export function hexMemo(nonce: string): string {
   return Array.from(new TextEncoder().encode(nonce))
