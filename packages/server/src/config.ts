@@ -7,6 +7,7 @@
  */
 import { NVIDIA_DEFAULT_BASE_URL } from './llm/nvidia';
 import { OVHCLOUD_DEFAULT_BASE_URL } from './llm/ovhcloud';
+import { DEFAULT_TRUSTLINE_AGENT_ID, TrustlineMode } from './risk/trustline';
 import {
   DEFAULT_OPENMETER_CUSTOMERS_PATH,
   DEFAULT_OPENMETER_EVENTS_PATH,
@@ -192,6 +193,32 @@ export interface ServerConfig {
   /** Hard deadline for one OpenMeter ingest call, ms (OPENMETER_TIMEOUT_MS). */
   openmeterTimeoutMs: number;
   /**
+   * T54 Trustline base URL (T54_TRUSTLINE_BASE_URL), e.g.
+   * https://portal.t54.ai/api/v1. Empty (the default) turns pre-execution
+   * underwriting OFF — nothing is submitted and no call is made.
+   */
+  trustlineBaseUrl: string;
+  /**
+   * T54 Trustline API key (T54_TRUSTLINE_API_KEY), `tl_sandbox_…` or
+   * `tl_production_…`. Runtime env only: never commit it, never log it, never
+   * publish it. Empty turns underwriting OFF. The prefix also selects the
+   * Trustline environment — both share one base URL.
+   */
+  trustlineApiKey: string;
+  /**
+   * What a Trustline decision does (T54_TRUSTLINE_MODE):
+   *   - "observe" (default) -> the decision is logged and returned with the
+   *     answer; the request is served either way. Nothing changes.
+   *   - "enforce" -> an explicit DECLINE returns 403 before any provider
+   *     tokens are spent. Anything else (outage, timeout, scope error) still
+   *     serves the request: the caller has already paid on-ledger.
+   */
+  trustlineMode: TrustlineMode;
+  /** Stable id for this gateway as a Trustline agent (T54_TRUSTLINE_AGENT_ID). */
+  trustlineAgentId: string;
+  /** Whole-assessment deadline, submit + polling, ms (T54_TRUSTLINE_TIMEOUT_MS). */
+  trustlineTimeoutMs: number;
+  /**
    * Platform markup on the provider's cost, in basis points
    * (PLATFORM_MARKUP_BPS, default 500 = 5%). customer price = cost x
    * (1 + bps/10000); platform fee = customer price - cost. 0 means "charge
@@ -295,6 +322,25 @@ function parsePaymentFacilitator(value: string | undefined): ServerConfig['payme
   }
 }
 
+/**
+ * Parse the Trustline mode. Like SONPAY_ENV this THROWS on an unrecognised
+ * value: "T54_TRUSTLINE_MODE=enforced" silently meaning "observe" would leave
+ * an operator believing declined requests are being blocked when they are not.
+ */
+function parseTrustlineMode(value: string | undefined): TrustlineMode {
+  switch ((value ?? '').toLowerCase()) {
+    case '':
+    case 'observe':
+      return 'observe';
+    case 'enforce':
+      return 'enforce';
+    default:
+      throw new Error(
+        `Invalid T54_TRUSTLINE_MODE="${value}". Use "observe" (default) or "enforce".`
+      );
+  }
+}
+
 /** Parse the routing strategy selector; unknown values fall back to "cheapest". */
 function parseRoutingStrategy(value: string | undefined): ServerConfig['routingStrategy'] {
   switch (value) {
@@ -385,6 +431,11 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     ),
     openmeterSource: env('OPENMETER_SOURCE') ?? 'sonpay',
     openmeterTimeoutMs: parsePositiveInt(env('OPENMETER_TIMEOUT_MS'), 5000),
+    trustlineBaseUrl: env('T54_TRUSTLINE_BASE_URL') ?? '',
+    trustlineApiKey: env('T54_TRUSTLINE_API_KEY') ?? '',
+    trustlineMode: parseTrustlineMode(env('T54_TRUSTLINE_MODE')),
+    trustlineAgentId: env('T54_TRUSTLINE_AGENT_ID') ?? DEFAULT_TRUSTLINE_AGENT_ID,
+    trustlineTimeoutMs: parsePositiveInt(env('T54_TRUSTLINE_TIMEOUT_MS'), 15000),
     platformMarkupBps: parseNonNegativeInt(env('PLATFORM_MARKUP_BPS'), 500),
     activityRetention: parsePositiveInt(env('ACTIVITY_RETENTION'), 500),
     webDist: env('WEB_DIST') ?? '',

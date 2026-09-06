@@ -547,6 +547,114 @@ else is reported honestly instead of guessed — the response carries
 `pricing` object. Such a request is still metered: unknown price does not mean
 unknown usage.
 
+## T54 Trustline risk gate (optional, off by default)
+
+Trustline is T54's agent-underwriting API: it answers *should this agent's
+transaction be allowed to execute?* Sonpay asks it at the one moment where the
+answer is still actionable — **after** the x402 payment is verified and
+**before** a single provider token is spent.
+
+It is off unless both variables are set:
+
+```bash
+T54_TRUSTLINE_BASE_URL=https://portal.t54.ai/api/v1
+T54_TRUSTLINE_API_KEY=tl_sandbox_...        # runtime only, never committed
+```
+
+With them unset, `/v1/chat` makes no Trustline call, returns no `risk` field,
+and behaves exactly as it did before. x402, the QuickNode and T54 facilitators,
+the router, the providers and OpenMeter are untouched either way.
+
+### The API it speaks
+
+Verified live against the sandbox key on 2026-09-06:
+
+| Call | Result |
+|---|---|
+| `POST /validation/assess-async` | `200` `{schema_version:"underwriting_async_submission.v1", status:"pending", trustline_transaction_id:"tl_txn_…", job_id, poll_url, retry_after_seconds:3}` |
+| `GET /underwriting/transactions/{id}` | the same transaction: `status`, and once `completed` a `decision` of `APPROVE` or `DECLINE` with `risk_level`, `confidence`, `reason_brief`, `reasons` |
+| `POST /validation/assess` (sync) | `400 developer_api_key_requires_async_endpoint` — a developer key must use the async pair, so only that pair is implemented |
+
+Auth is `Authorization: Bearer tl_{env}_{key_id}.{secret}` on **both** calls.
+The docs say the poll needs no key; the live API answers `401 invalid_api_key`
+("Developer API key is required") without one. Sandbox and production share the
+base URL — the key prefix picks the environment. `https://api-sandbox.t54.ai`
+answers `404` for these paths.
+
+Errors come back as `{"detail":{"code":…,"message":…}}`: `invalid_api_key`
+(401, wrong key), `api_key_scope_denied` (403, right key, missing underwriting
+scope).
+
+### What Sonpay sends
+
+The payment facts and the routed model — never prompt or completion text:
+
+```jsonc
+{
+  "assessment_type": "transaction",
+  "agent_id": "sonpay-gateway",              // T54_TRUSTLINE_AGENT_ID
+  "transaction_data": {
+    "transaction": {
+      "transaction_id": "<x402 payment id>", // the on-ledger tx hash
+      "amount": 1,                           // XRP, converted from drops
+      "currency": "XRP",
+      "chain": "xrpl:1",
+      "recipient": "rGateway…"
+    },
+    "audit_context": {
+      "current_task": "Serve one paid inference request on https://…/v1/chat using model deepseek-chat (deepseek), unlocked by x402 payment <id>.",
+      "reasoning_process": "The x402 payment of 1 XRP to rGateway… on xrpl:1 was verified before this assessment, paid by rPayer…. Provider tokens have not been spent yet."
+    },
+    "request_body": {
+      "http": { "url": "https://…/v1/chat", "method": "POST" },
+      "body": { "model": "deepseek-chat", "provider": "deepseek", "payment_id": "…", "payment_asset": "XRP", "network": "xrpl:1", "payer": "rPayer…" }
+    }
+  },
+  "metadata": { "source": "sonpay", "environment": "sandbox" }
+}
+```
+
+with `Idempotency-Key: sonpay:<payment id>` — derived from the payment, never
+random, so a replayed request cannot open a second assessment.
+
+### What a decision does
+
+`T54_TRUSTLINE_MODE` decides:
+
+- **`observe` (default)** — the decision is logged (`risk_assessed` /
+  `risk_declined`) and reported in the response's `risk` object, and the
+  request is answered either way.
+- **`enforce`** — a `DECLINE` answers `403 RISK_DECLINED` and **no provider is
+  called**. Anything else proceeds.
+
+```jsonc
+// 200, observe or approved
+{ "content": "…", "usage": {…}, "risk": { "status": "approved", "transactionId": "tl_txn_…", "riskLevel": "low", "confidence": 0.94 } }
+
+// 403, enforce + DECLINE — nothing was spent
+{ "error": "RISK_DECLINED", "message": "…", "risk": { "status": "declined", … } }
+```
+
+### It fails open, deliberately
+
+By the time the gate runs, the caller has **already paid on ledger**. A
+Trustline outage, timeout, scope error or quota problem must not turn a settled
+payment into no answer, so everything that is not an explicit `DECLINE`
+resolves to `status: "unavailable"` and the request proceeds. Only a decision
+Trustline actually returned can block one. The Agentic Challenge flow
+(`requires_information`) is not implemented: it resolves to `unavailable` too.
+
+On mainnet the safety rules in `src/mainnet.ts` add two more:
+`T54_TRUSTLINE_MODE=enforce` **requires a `tl_production_…` key** — a sandbox
+key must not decide whether a real payment executes — and
+`T54_TRUSTLINE_BASE_URL` must be `https://`. A sandbox key that only observes
+is allowed, with a startup warning that its decisions are test decisions.
+
+The key is read from the environment at startup, never logged, never returned
+in a result, and never published: `/v1/config` has no Trustline field at all,
+so the console cannot see it. The listening line reports only
+`trustline: "observe:sandbox"` or `"off"`.
+
 ## The console (web frontend)
 
 `packages/web` is a Vite + React + TypeScript single-page console for the
@@ -730,6 +838,11 @@ or token, no facilitator or RPC URL. A test asserts this.
 | `OPENMETER_AUTO_CREATE_CUSTOMERS` | `true` | Register a verified payer as an OpenMeter customer before reporting its usage. `false` = you manage customers in the Konnect UI and the server never writes to the customer list |
 | `OPENMETER_SOURCE` | `sonpay` | CloudEvents `source`; also namespaces the event id, which is what deduplicates a replayed payment |
 | `OPENMETER_TIMEOUT_MS` | `5000` | Deadline for one ingest call — a slow meter never holds up a paid answer |
+| `T54_TRUSTLINE_BASE_URL` | *(empty)* | T54 Trustline API base (`https://portal.t54.ai/api/v1`). Empty = the optional risk gate is off |
+| `T54_TRUSTLINE_API_KEY` | *(empty)* | Trustline developer key, `tl_{env}_{key_id}.{secret}`. **Runtime only — never commit it.** Empty = the gate is off |
+| `T54_TRUSTLINE_MODE` | `observe` | `observe` (decide and log, answer either way) or `enforce` (a `DECLINE` answers `403 RISK_DECLINED` and no provider is called). Any other value is a startup error |
+| `T54_TRUSTLINE_AGENT_ID` | `sonpay-gateway` | `agent_id` the assessment is filed under at T54 |
+| `T54_TRUSTLINE_TIMEOUT_MS` | `15000` | Deadline for one assessment (submit + polling). On timeout the request proceeds — it is already paid for |
 | `PLATFORM_MARKUP_BPS` | `500` | Markup on the provider's cost in basis points (`500` = 5%). `0` is legal: cost with no fee |
 | `ACTIVITY_RETENTION` | `500` | Requests the console's in-memory ledger keeps (`/v1/activity`, `/v1/payments`). A rolling window, not a billing record |
 | `WEB_DIST` | *(empty)* | Directory of built console assets for the gateway to serve (e.g. `packages/web/dist`). Empty = API only, which is what you want when Vite serves the console in dev |

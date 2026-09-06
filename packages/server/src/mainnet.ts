@@ -18,6 +18,7 @@
  * facilitator is built through.
  */
 import { ServerConfig, XRPL_MAINNET, XRPL_TESTNET } from './config';
+import { trustlineEnvironment } from './risk/trustline';
 
 /**
  * RLUSD issuer on XRPL TESTNET (documented in .env.example / README).
@@ -187,6 +188,23 @@ function productionProblems(config: ServerConfig): string[] {
   const amount = amountProblem(config);
   if (amount !== undefined) problems.push(amount);
 
+  // 6. Optional risk gate. A sandbox Trustline key judges against test data,
+  // so it must never be the thing that blocks — or clears — a real payment.
+  if (
+    config.trustlineMode === 'enforce' &&
+    config.trustlineApiKey !== '' &&
+    trustlineEnvironment(config.trustlineApiKey) !== 'production'
+  ) {
+    problems.push(
+      'T54_TRUSTLINE_MODE=enforce in production requires a production Trustline key ' +
+        '(tl_production_…). A sandbox key must not decide whether a real payment executes.'
+    );
+  }
+  if (config.trustlineBaseUrl !== '' && config.trustlineApiKey !== '') {
+    const scheme = requireHttps(config.trustlineBaseUrl, 'T54_TRUSTLINE_BASE_URL');
+    if (scheme !== undefined) problems.push(scheme);
+  }
+
   return problems;
 }
 
@@ -241,6 +259,16 @@ export function productionWarnings(config: ServerConfig): string[] {
     warnings.push(
       'usage metering is OFF (OPENMETER_URL / OPENMETER_API_KEY unset): requests will be ' +
         'served and priced, but no usage event will be recorded.'
+    );
+  }
+  if (
+    config.trustlineBaseUrl !== '' &&
+    config.trustlineApiKey !== '' &&
+    trustlineEnvironment(config.trustlineApiKey) === 'sandbox'
+  ) {
+    warnings.push(
+      'T54 Trustline is configured with a SANDBOX key (tl_sandbox_…): its decisions are ' +
+        'test decisions. They are observed and logged only.'
     );
   }
   if (!config.routingSkipUnconfiguredProviders) {

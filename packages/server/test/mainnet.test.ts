@@ -272,6 +272,47 @@ describe('asset and network', () => {
   });
 });
 
+// --- the optional Trustline risk gate ----------------------------------------
+
+describe('T54 Trustline in production', () => {
+  const trustline = {
+    trustlineBaseUrl: 'https://portal.t54.ai/api/v1',
+    trustlineApiKey: 'tl_sandbox_testkeyid.testsecret',
+  };
+
+  it('refuses to let a sandbox key block real payments', () => {
+    const message = startupError(
+      mainnetConfig({ ...trustline, trustlineMode: 'enforce' })
+    );
+    expect(message).toMatch(/requires a production Trustline key/);
+  });
+
+  it('accepts a production key in enforce mode', () => {
+    expect(() =>
+      createFacilitator(
+        mainnetConfig({
+          ...trustline,
+          trustlineApiKey: 'tl_production_testkeyid.testsecret',
+          trustlineMode: 'enforce',
+        })
+      )
+    ).not.toThrow();
+  });
+
+  it('allows a sandbox key that only observes, but says so', () => {
+    const config = mainnetConfig(trustline);
+    expect(() => createFacilitator(config)).not.toThrow();
+    expect(productionWarnings(config).join(' ')).toMatch(/SANDBOX key/);
+  });
+
+  it('refuses a plaintext Trustline URL in production', () => {
+    const message = startupError(
+      mainnetConfig({ ...trustline, trustlineBaseUrl: 'http://portal.t54.ai/api/v1' })
+    );
+    expect(message).toMatch(/T54_TRUSTLINE_BASE_URL/);
+  });
+});
+
 // --- what the server publishes about itself ----------------------------------
 
 describe('GET /v1/config under a mainnet configuration', () => {

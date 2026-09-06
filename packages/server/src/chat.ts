@@ -29,6 +29,13 @@
  *   See `adapterFor` — it is the single source of truth for both "can we call
  *   this provider?" and "how do we call it?".
  *
+ * Optional pre-execution underwriting (src/risk/trustline.ts): when
+ * T54_TRUSTLINE_BASE_URL and T54_TRUSTLINE_API_KEY are set, the verified
+ * payment is submitted to T54 Trustline AFTER payment verification and BEFORE
+ * any provider tokens are spent. It only observes until
+ * T54_TRUSTLINE_MODE=enforce, and it always fails open: only a decision
+ * Trustline actually returned can stop a request the caller has paid for.
+ *
  * After a real provider answers, and only then, the handler:
  *   1. normalizes the provider's own input/output/total token counts,
  *   2. reports them to OpenMeter as one `kong.llm_request` event, keyed by the
@@ -58,6 +65,7 @@ import { LlmError, ProviderCall } from './llm/provider';
 import { ServerConfig } from './config';
 import { Logger } from './logger';
 import { normalizeTokens, priceRequest, TokenCounts } from './pricing';
+import { TrustlineClient, TrustlineResult } from './risk/trustline';
 import {
   buildRequestId,
   LlmUsageEvent,
@@ -329,6 +337,54 @@ async function meterUsage(
   return result;
 }
 
+
+/**
+ * Ask T54 Trustline whether this paid request should execute.
+ *
+ * Runs after payment verification and before any provider call, because
+ * spending provider tokens is the irreversible step. Never throws, and never
+ * blocks on its own: the caller decides what a decision means (see
+ * `TrustlineClient.blocks`).
+ */
+async function assessRisk(
+  trustline: TrustlineClient,
+  payment: PaymentState | undefined,
+  model: ModelSpec,
+  resourceUrl: string,
+  config: ServerConfig,
+  log: Logger
+): Promise<TrustlineResult> {
+  if (!trustline.enabled) return { status: 'disabled' };
+  if (payment?.verified !== true || payment.paymentId === undefined) {
+    return { status: 'skipped', reason: 'no-verified-payment' };
+  }
+
+  const result = await trustline.assess({
+    paymentId: payment.paymentId,
+    payer: payment.payer,
+    amount: config.rewardDrops,
+    asset: payment.asset ?? config.paymentAsset,
+    receiver: config.paymentReceiver,
+    network: config.network,
+    model: model.id,
+    provider: model.provider,
+    resourceUrl,
+  });
+
+  const line = {
+    status: result.status,
+    mode: trustline.mode,
+    reason: result.reason,
+    transactionId: result.transactionId,
+    riskLevel: result.riskLevel,
+    model: model.id,
+  };
+  if (result.status === 'declined') log.warn('risk_declined', line);
+  else if (result.status === 'unavailable') log.warn('risk_unavailable', line);
+  else log.info('risk_assessed', line);
+  return result;
+}
+
 /**
  * @param fetchImpl Injectable fetch handed to the provider adapters so tests
  *   can exercise the fallback chain without touching the network.
@@ -342,6 +398,16 @@ export function createChatHandler(config: ServerConfig, log: Logger, fetchImpl?:
     customersPath: config.openmeterCustomersPath,
     source: config.openmeterSource,
     timeoutMs: config.openmeterTimeoutMs,
+    fetchImpl,
+  });
+  // Optional pre-execution underwriting. Disabled unless both the URL and the
+  // key are configured, in which case `assess` returns without a call.
+  const trustline = new TrustlineClient({
+    baseUrl: config.trustlineBaseUrl,
+    apiKey: config.trustlineApiKey,
+    agentId: config.trustlineAgentId,
+    mode: config.trustlineMode,
+    timeoutMs: config.trustlineTimeoutMs,
     fetchImpl,
   });
 
@@ -390,6 +456,33 @@ export function createChatHandler(config: ServerConfig, log: Logger, fetchImpl?:
       paid: (req as PayRequest).payment?.verified === true,
     });
 
+    // --- Optional risk gate: runs before a single provider token is spent ---
+    const resourceUrl =
+      config.publicUrl !== ''
+        ? `${config.publicUrl.replace(/\/+$/, '')}${req.path}`
+        : `${req.protocol}://${req.get('host') ?? 'localhost'}${req.path}`;
+    const risk = await assessRisk(
+      trustline,
+      (req as PayRequest).payment,
+      model,
+      resourceUrl,
+      config,
+      log
+    );
+    if (trustline.blocks(risk)) {
+      res.status(403).json({
+        error: 'RISK_DECLINED',
+        message:
+          risk.reasonBrief ??
+          'T54 Trustline declined this transaction, so it was not executed.',
+        risk,
+      });
+      return;
+    }
+    // Reported with the answer only when an assessment actually ran, so a
+    // gateway without Trustline configured returns exactly what it did before.
+    const riskBlock = risk.status === 'disabled' ? {} : { risk };
+
     // --- Real provider path: DeepSeek (OpenAI-compatible) ---
     // The chain is walked only for retryable failures, and only across models
     // a real adapter can serve — falling back to the stub would hand a paying
@@ -430,6 +523,7 @@ export function createChatHandler(config: ServerConfig, log: Logger, fetchImpl?:
               ? { pricing: priced.pricing }
               : { pricingUnavailable: priced.reason }),
             metering,
+            ...riskBlock,
             routing: routingSummary(decision, attempts),
           });
           return;
@@ -456,6 +550,7 @@ export function createChatHandler(config: ServerConfig, log: Logger, fetchImpl?:
       costPer1MTokens: decision.costPer1MTokens,
       content: result.content,
       stub: true,
+      ...riskBlock,
       routing: routingSummary(decision, 0),
     });
   };
