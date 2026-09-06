@@ -10,9 +10,11 @@ import { Facilitator } from './facilitator/facilitator';
 import { MockFacilitator } from './facilitator/mock-facilitator';
 import { QuickNodeFacilitator } from './facilitator/quicknode-facilitator';
 import { T54Facilitator } from './facilitator/t54-facilitator';
+import { assertProductionSafety, networkLabel, productionWarnings } from './mainnet';
 
 export { createApp } from './server';
 export * from './config';
+export * from './mainnet';
 export * from './logger';
 export * from './x402';
 export * from './facilitator/facilitator';
@@ -42,8 +44,17 @@ export * from './catalog';
  * the environment. Payment authorization always happens BEFORE any provider
  * execution; facilitators only verify/settle — the server never signs for a
  * payer.
+ *
+ * This function is also the choke point where a production (XRPL Mainnet)
+ * configuration is validated: `assertProductionSafety()` throws before any
+ * facilitator exists, so a mainnet deployment that is missing configuration —
+ * or that would fall back to the mock — never starts. See src/mainnet.ts.
  */
 export function createFacilitator(config: ServerConfig): Facilitator {
+  // Fail fast, before anything is built: a mainnet server with testnet or
+  // missing configuration must not reach the first request.
+  assertProductionSafety(config);
+
   const selection: string = config.paymentFacilitator ?? 'mock';
 
   if (selection === 't54') {
@@ -112,15 +123,28 @@ export function createServer(
   log: Logger = new Logger(config.logLevel)
 ): ServerHandle {
   const facilitator = createFacilitator(config);
+  for (const warning of productionWarnings(config)) {
+    log.warn('production_warning', { warning });
+  }
   const app = createApp({ facilitator, config, logger: log });
   return { app, facilitator, config, log };
 }
 
 /** Start the HTTP server. Resolves with the listening server handle. */
 export function startServer(config: ServerConfig = loadConfig()) {
-  const { app, log, config: cfg } = createServer(config);
+  const { app, log, config: cfg, facilitator } = createServer(config);
   const server = app.listen(cfg.port, cfg.host, () => {
-    log.info('server_listening', { host: cfg.host, port: cfg.port });
+    // The network/facilitator pair is the first thing an operator checks after
+    // a mainnet deploy, so it goes in the listening line itself.
+    log.info('server_listening', {
+      host: cfg.host,
+      port: cfg.port,
+      environment: cfg.environment,
+      network: cfg.network,
+      networkLabel: networkLabel(cfg.network),
+      asset: cfg.paymentAsset,
+      facilitator: facilitator.name,
+    });
   });
   return server;
 }

@@ -81,7 +81,7 @@ export function Landing() {
           </div>
           <div>
             <dt>Network</dt>
-            <dd>{config.data?.payment.network ?? '—'}</dd>
+            <dd>{config.data?.payment.networkLabel ?? '—'}</dd>
           </div>
           <div>
             <dt>Models live now</dt>

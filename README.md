@@ -604,12 +604,107 @@ console itself, from the same origin as the API:
 WEB_DIST=packages/web/dist npm start
 ```
 
+## Going live on XRPL Mainnet
+
+The gateway runs the same code on testnet and mainnet; only configuration
+differs. That makes the configuration the safety boundary, so it is checked at
+startup — `assertProductionSafety()` in
+[`packages/server/src/mainnet.ts`](packages/server/src/mainnet.ts) runs from
+`createFacilitator()`, the single choke point every facilitator is built
+through. A mainnet deployment that is missing or contradictory configuration
+**does not start**, and it reports every problem at once.
+
+### The production environment set
+
+```bash
+SONPAY_ENV=production
+XRPL_NETWORK=xrpl:0                       # XRPL Mainnet
+PAYMENT_RECEIVER=r...                     # your mainnet receiving address
+PAYMENT_ASSET=XRP                         # or RLUSD (+ the MAINNET RLUSD_ISSUER)
+PAYMENT_REWARD_DROPS=1000000              # 1 XRP, in drops
+PAYMENT_FACILITATOR=quicknode             # or t54 — "mock" is refused
+XRPL_RPC_URL=https://<your-mainnet-node>  # quicknode path, https only
+T54_FACILITATOR_URL=https://xrpl-facilitator-mainnet.t54.ai   # t54 path only
+OPENMETER_URL=https://in.api.konghq.com
+OPENMETER_API_KEY=...                     # runtime only, never committed
+```
+
+`SONPAY_ENV` may be left unset: it is then **derived** from `XRPL_NETWORK`, so
+`xrpl:0` alone turns the production rules on rather than off. A declared value
+that contradicts the network is an error in both directions.
+
+### What production refuses
+
+| Refused | Why |
+|---|---|
+| `PAYMENT_FACILITATOR=mock` (explicit **or** by default) | The mock accepts a signed nonce instead of an on-ledger payment. The legacy "mock + `XRPL_RPC_URL` silently becomes QuickNode" auto-selection does not apply on mainnet: the operator must name the facilitator that gates the money |
+| `XRPL_NETWORK` that is not `xrpl:0` | Production settles on mainnet or not at all |
+| `XRPL_NETWORK=xrpl:0` with `SONPAY_ENV=development` | Mainnet configuration running with the safety rules off |
+| A testnet/devnet/localhost `XRPL_RPC_URL` or `T54_FACILITATOR_URL` | Test funds are free; they must not buy real answers |
+| A mainnet RPC endpoint while `XRPL_NETWORK` is testnet | A payment verified on the wrong network is not a payment |
+| A plaintext `http://` RPC or facilitator URL | Verification data must not be readable in transit |
+| A missing or malformed `PAYMENT_RECEIVER` | Payments would land nowhere |
+| `PAYMENT_ASSET=RLUSD` with no issuer, a malformed issuer, or the **testnet** RLUSD issuer | Test RLUSD is worthless |
+| An unsupported asset, or a non-positive `PAYMENT_REWARD_DROPS` | The verifier cannot check what it cannot price |
+
+Metering is the deliberate exception: production **warns** at startup when
+`OPENMETER_URL`/`OPENMETER_API_KEY` are unset (and when no provider has
+credentials, or unconfigured providers may still be routed to) but keeps
+running. A metering outage must never take down a payment gateway; the payment
+path does not depend on it.
+
+Nothing mainnet is hardcoded anywhere in the code. The only literal address in
+`mainnet.ts` is the **testnet** RLUSD issuer, present solely as a denylist.
+
+### What the console shows on mainnet
+
+`GET /v1/config` gains `environment`, `payment.networkLabel`,
+`payment.mainnet` and `payment.live`, and the console reads all four from the
+server rather than guessing:
+
+- a standing banner: **XRPL Mainnet · payments are real XRP · verified on-ledger by `<facilitator>`**
+- the footer status line and the landing page read *XRPL Mainnet* instead of `xrpl:0`
+- the quickstart warns, before you sign, that the payment moves real XRP
+- the answer panel shows the settled transaction hash, linked to
+  [livenet.xrpl.org](https://livenet.xrpl.org)
+- the "Simulate payment (mock facilitator)" button is driven by `payment.live`,
+  so it cannot appear on mainnet — where the mock cannot run at all
+
+`/v1/config` still publishes nothing secret: no provider key, no OpenMeter URL
+or token, no facilitator or RPC URL. A test asserts this.
+
+### First real mainnet transaction
+
+1. Fund and control a mainnet receiving address (reserve: 1 XRP as of today).
+   The gateway never holds a key — it only ever reads a transaction hash.
+2. Set the environment set above on the gateway host. Keep
+   `PAYMENT_REWARD_DROPS` small for the first run (e.g. `100000` = 0.1 XRP).
+3. Start the gateway and read the `server_listening` line: it must show
+   `environment: production`, `network: xrpl:0`, `networkLabel: XRPL Mainnet`
+   and the facilitator you configured. If it did not start, the error lists
+   every configuration problem.
+4. `curl -isS -X POST https://<host>/v1/chat -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"hello"}]}'`
+   → `402` with `WWW-Authenticate: x402` and a challenge whose `network` is
+   `xrpl:0`, `receiver` is your address, and `nonce` is single-use.
+5. From **your own wallet** (Xaman, Crossmark, GemWallet, the `xrpl` library),
+   send exactly `rewardDrops` to `receiver` with the challenge nonce
+   hex-encoded into the transaction's `MemoData`. Sonpay never asks for a seed
+   and never signs for a payer.
+6. Wait for the transaction to be validated, then retry the identical request
+   with `X-PAYMENT: {"txHash":"<hash>","payment":<the challenge's payment object>}`.
+7. Expect `200` with the answer, the routed model and the price breakdown. The
+   payment appears on `/payments` with its hash linked to livenet, and the
+   usage event reaches OpenMeter.
+8. Replay the same `X-PAYMENT` header once: it must come back `402`
+   (`payment-already-used`). One payment, one request.
+
 ## Environment variables
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `PORT` / `HOST` | `8080` / `0.0.0.0` | Where the server listens |
-| `XRPL_NETWORK` | `xrpl:1` | `xrpl:1` = testnet, `xrpl:0` = mainnet |
+| `SONPAY_ENV` | *(derived from `XRPL_NETWORK`)* | `development` or `production`. `production` turns on the XRPL Mainnet safety rules (see above) and refuses a mock facilitator, a testnet network/URL, a missing receiver or an inconsistent asset. An unrecognised value is an error, never a silent fallback |
+| `XRPL_NETWORK` | `xrpl:1` | `xrpl:1` = testnet, `xrpl:0` = mainnet. On its own, `xrpl:0` puts the server in production mode |
 | `PAYMENT_RECEIVER` | *(empty)* | Address that collects payments (required for real verification) |
 | `PAYMENT_REWARD_DROPS` | `1000000` | Per-request amount: XRP drops when `PAYMENT_ASSET=XRP`, value (e.g. `0.01`) when `PAYMENT_ASSET=RLUSD` |
 | `PAYMENT_FACILITATOR` | `mock` | Which payment facilitator: `mock` (default — current zero-config behavior: in-process real verifier when `XRPL_RPC_URL` is set, else in-memory mock), `quicknode` (real on-ledger verification via `XRPL_RPC_URL`), or `t54` (hosted T54 facilitator via `T54_FACILITATOR_URL`) |
@@ -671,6 +766,7 @@ the network.
 7. [x] Usage ledger — per-request token usage reported to OpenMeter as `kong.llm_request` (idempotent per payment; failures never re-run the model)
 8. [x] Platform fee/markup on each request (`PLATFORM_MARKUP_BPS`, default 5%; unpriced models are metered, never guessed)
 9. [x] Web console — landing, dashboard, models, payments, usage, quickstart playground and keys, on additive read-only endpoints (`packages/web`)
+10. [x] XRPL Mainnet production support — env-driven mainnet configuration, fail-fast safety rules (`SONPAY_ENV`, no mock/testnet in production), and a console that says which network it is on (see "Going live on XRPL Mainnet")
 
 ## License
 

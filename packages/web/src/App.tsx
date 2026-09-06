@@ -67,6 +67,25 @@ function Nav() {
   );
 }
 
+/**
+ * Standing warning that this gateway is on XRPL Mainnet.
+ *
+ * Both facts come from `GET /v1/config` — the console never decides for itself
+ * which network it is talking to.
+ */
+function EnvBanner() {
+  const { data } = useApi((signal) => api.config(signal));
+  if (data === undefined || !data.payment.mainnet) return null;
+
+  return (
+    <div className="env-banner" role="status">
+      <strong>{data.payment.networkLabel}</strong> · payments are real{' '}
+      {data.payment.asset} and are verified on-ledger by{' '}
+      <span className="mono">{data.payment.facilitator}</span>.
+    </div>
+  );
+}
+
 /** Footer status line — the live network/asset, or the fact that we cannot see it. */
 function StatusBar() {
   const { data, error } = useApi((signal) => api.config(signal));
@@ -80,9 +99,13 @@ function StatusBar() {
         <span className="footer-status">
           {error !== undefined && <span className="dot dot-bad" title={error} />}
           {error !== undefined && 'gateway unreachable'}
-          {data !== undefined && <span className="dot dot-ok" />}
+          {data !== undefined && (
+            <span className={data.payment.mainnet ? 'dot dot-live' : 'dot dot-ok'} />
+          )}
           {data !== undefined &&
-            `${data.payment.network} · ${data.payment.asset} · facilitator: ${data.payment.facilitator}`}
+            `${data.payment.networkLabel} · ${data.payment.asset} · facilitator: ${data.payment.facilitator}${
+              data.payment.live ? '' : ' (verifies nothing on-ledger)'
+            }`}
         </span>
       </div>
     </footer>
@@ -93,6 +116,7 @@ export function App() {
   return (
     <div className="app">
       <Nav />
+      <EnvBanner />
       <main className="main">
         <Routes>
           <Route path="/" element={<Landing />} />

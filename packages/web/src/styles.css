@@ -120,6 +120,16 @@ p {
   padding: 1.75rem 1.25rem 4rem;
 }
 
+/* Shown only when the gateway reports XRPL Mainnet. */
+.env-banner {
+  border-bottom: 1px solid rgba(217, 164, 65, 0.4);
+  background: rgba(217, 164, 65, 0.12);
+  color: var(--warn);
+  text-align: center;
+  padding: 0.5rem 1.25rem;
+  font-size: 0.85rem;
+}
+
 .nav {
   position: sticky;
   top: 0;
@@ -238,6 +248,11 @@ p {
 }
 .dot-bad {
   background: var(--bad);
+}
+/* Mainnet: same "we can see the gateway" meaning, louder colour. */
+.dot-live {
+  background: var(--warn);
+  box-shadow: 0 0 0 3px rgba(217, 164, 65, 0.18);
 }
 
 /* ---------- buttons & controls ---------- */
