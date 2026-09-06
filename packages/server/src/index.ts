@@ -11,6 +11,7 @@ import { MockFacilitator } from './facilitator/mock-facilitator';
 import { QuickNodeFacilitator } from './facilitator/quicknode-facilitator';
 import { T54Facilitator } from './facilitator/t54-facilitator';
 import { assertProductionSafety, networkLabel, productionWarnings } from './mainnet';
+import { trustlineEnvironment } from './risk/trustline';
 
 export { createApp } from './server';
 export * from './config';
@@ -21,6 +22,7 @@ export * from './facilitator/facilitator';
 export * from './facilitator/mock-facilitator';
 export * from './facilitator/quicknode-facilitator';
 export * from './facilitator/t54-facilitator';
+export * from './risk/trustline';
 export * from './chat';
 export * from './model-stub';
 export * from './activity';
@@ -144,6 +146,11 @@ export function startServer(config: ServerConfig = loadConfig()) {
       networkLabel: networkLabel(cfg.network),
       asset: cfg.paymentAsset,
       facilitator: facilitator.name,
+      // Never the key itself — only whether the gate is on, and in which mode.
+      trustline:
+        cfg.trustlineBaseUrl !== '' && cfg.trustlineApiKey !== ''
+          ? `${cfg.trustlineMode}:${trustlineEnvironment(cfg.trustlineApiKey)}`
+          : 'off',
     });
   });
   return server;
