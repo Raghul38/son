@@ -672,3 +672,109 @@ describe('Facilitator seam wiring (real facilitator)', () => {
     expect(typeof paid.body.content).toBe('string');
   });
 });
+
+// --- Destination tag ---------------------------------------------------------
+
+/**
+ * A receiver with RequireDest set rejects untagged payments on the ledger, and
+ * a deposit address credits by tag. When PAYMENT_DESTINATION_TAG is set the
+ * challenge has to advertise the tag and the verifier has to hold the payment
+ * to it — otherwise a payer follows the challenge and still loses the money.
+ */
+describe('QuickNodeFacilitator — destination tag', () => {
+  const TAG = 42;
+
+  it('advertises the configured tag in the payment request', async () => {
+    const request = await makeFacilitator().createPaymentRequest({
+      network: 'xrpl:1',
+      receiver: RECEIVER,
+      rewardDrops: AMOUNT_DROPS,
+      destinationTag: TAG,
+    });
+    expect(request.destinationTag).toBe(TAG);
+  });
+
+  it('omits the tag when the operator did not configure one', async () => {
+    const request = await makeFacilitator().createPaymentRequest({
+      network: 'xrpl:1',
+      receiver: RECEIVER,
+      rewardDrops: AMOUNT_DROPS,
+    });
+    expect(request.destinationTag).toBeUndefined();
+  });
+
+  it('accepts a payment carrying the advertised tag', async () => {
+    const f = makeFacilitator({
+      fetchImpl: rpcResponder({
+        result: ledgerTx({
+          DestinationTag: TAG,
+          Memos: [{ Memo: { MemoData: hex('nonce-1') } }],
+        }),
+      }),
+    });
+    const req = challengeRequest({ destinationTag: TAG });
+    expect(await f.verifyPayment(submittedPayment(TX_HASH, req), req)).toMatchObject({
+      valid: true,
+    });
+  });
+
+  it('refuses a payment with no tag when the challenge asked for one', async () => {
+    const f = makeFacilitator({
+      fetchImpl: rpcResponder({
+        result: ledgerTx({ Memos: [{ Memo: { MemoData: hex('nonce-1') } }] }),
+      }),
+    });
+    const req = challengeRequest({ destinationTag: TAG });
+    expect(await f.verifyPayment(submittedPayment(TX_HASH, req), req)).toEqual({
+      valid: false,
+      reason: 'wrong-destination-tag',
+    });
+  });
+
+  it('refuses a payment carrying a different tag', async () => {
+    const f = makeFacilitator({
+      fetchImpl: rpcResponder({
+        result: ledgerTx({
+          DestinationTag: 7,
+          Memos: [{ Memo: { MemoData: hex('nonce-1') } }],
+        }),
+      }),
+    });
+    const req = challengeRequest({ destinationTag: TAG });
+    expect(await f.verifyPayment(submittedPayment(TX_HASH, req), req)).toEqual({
+      valid: false,
+      reason: 'wrong-destination-tag',
+    });
+  });
+
+  it('ignores a tag the payer added when the challenge asked for none', async () => {
+    // Tagging a payment is always allowed; it just is not required here.
+    const f = makeFacilitator({
+      fetchImpl: rpcResponder({
+        result: ledgerTx({
+          DestinationTag: 999,
+          Memos: [{ Memo: { MemoData: hex('nonce-1') } }],
+        }),
+      }),
+    });
+    expect(
+      await f.verifyPayment(
+        submittedPayment(TX_HASH, challengeRequest()),
+        challengeRequest()
+      )
+    ).toMatchObject({ valid: true });
+  });
+
+  it('treats tag 0 as a real tag, not as "unset"', async () => {
+    const f = makeFacilitator({
+      fetchImpl: rpcResponder({
+        result: ledgerTx({ Memos: [{ Memo: { MemoData: hex('nonce-1') } }] }),
+      }),
+    });
+    const req = challengeRequest({ destinationTag: 0 });
+    expect(await f.verifyPayment(submittedPayment(TX_HASH, req), req)).toEqual({
+      valid: false,
+      reason: 'wrong-destination-tag',
+    });
+  });
+});

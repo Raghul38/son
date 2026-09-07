@@ -182,6 +182,17 @@ export function Quickstart() {
               <Mono>{config.data?.payment.receiver !== '' ? config.data?.payment.receiver : 'not configured'}</Mono>
             </td>
           </tr>
+          {config.data?.payment.destinationTag !== undefined && (
+            <tr>
+              <td>Destination tag</td>
+              <td>
+                <Mono>{config.data.payment.destinationTag}</Mono>{' '}
+                <span className="muted small">
+                  required — an untagged payment is rejected
+                </span>
+              </td>
+            </tr>
+          )}
           <tr>
             <td>Network</td>
             <td>
@@ -234,7 +245,8 @@ Content-Type: application/vnd+http.x402.challenge+json
   "payment": {
     "network": "${config.data?.payment.network ?? 'xrpl:1'}",
     "receiver": "${config.data?.payment.receiver !== undefined && config.data.payment.receiver !== '' ? config.data.payment.receiver : '<receiver address>'}",
-    "rewardDrops": "${config.data?.payment.amount ?? '1000000'}",
+    "rewardDrops": "${config.data?.payment.amount ?? '1000000'}",${config.data?.payment.destinationTag !== undefined ? `
+    "destinationTag": ${config.data.payment.destinationTag},` : ''}
     "nonce": "<nonce>",
     "expiresAt": "<ISO-8601, 5 minutes out>"
   }
@@ -247,6 +259,13 @@ Content-Type: application/vnd+http.x402.challenge+json
           Send the exact amount to the receiver from your own wallet, with the nonce hex-encoded
           into a memo, and retry the identical request with the transaction hash attached.
         </p>
+        {config.data?.payment.destinationTag !== undefined && (
+          <p className="muted">
+            This receiver requires destination tag{' '}
+            <Mono>{config.data.payment.destinationTag}</Mono>. A payment without it is refused —
+            on the ledger by the receiving account, and here by the verifier.
+          </p>
+        )}
         <Code
           label="curl"
           code={`curl -sS -X POST ${origin}/v1/chat \\
@@ -340,6 +359,15 @@ Content-Type: application/vnd+http.x402.challenge+json
                   <Mono>{terms.receiver}</Mono>
                 </td>
               </tr>
+              {terms.destinationTag !== undefined && (
+                <tr>
+                  <td>Destination tag</td>
+                  <td>
+                    <Mono>{terms.destinationTag}</Mono>{' '}
+                    <span className="muted small">put this on the payment</span>
+                  </td>
+                </tr>
+              )}
               <tr>
                 <td>Amount</td>
                 <td>

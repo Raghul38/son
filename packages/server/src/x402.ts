@@ -75,6 +75,7 @@ async function buildChallenge(facilitator: Facilitator, config: ServerConfig): P
     network: config.network,
     receiver: config.paymentReceiver,
     rewardDrops: config.rewardDrops,
+    destinationTag: config.paymentDestinationTag,
   });
   return { scheme: 'x402', payment, token: payment.nonce };
 }
@@ -107,6 +108,7 @@ function extractPaymentRequest(value: unknown): PaymentRequest | null {
       expiresAt: new Date(Date.now() + 60 * 1000).toISOString(),
       asset: asset === 'XRP' ? undefined : asset,
       issuer: (extra.issuer as string) ?? undefined,
+      destinationTag: (extra.destinationTag as number) ?? undefined,
     } as PaymentRequest;
   }
 
@@ -161,7 +163,8 @@ function matchesServerTerms(value: unknown, config: ServerConfig): boolean {
       req.receiver === config.paymentReceiver &&
       req.rewardDrops === config.rewardDrops &&
       (req.asset ?? 'XRP') === expectedAsset &&
-      (req.issuer ?? '') === expectedIssuer
+      (req.issuer ?? '') === expectedIssuer &&
+      (req.destinationTag ?? null) === (config.paymentDestinationTag ?? null)
     );
   }
 
@@ -179,7 +182,8 @@ function matchesServerTerms(value: unknown, config: ServerConfig): boolean {
     (accepted.payTo as string) === config.paymentReceiver &&
     (accepted.amount as string) === config.rewardDrops &&
     asset === expectedAsset &&
-    ((extra.issuer as string) ?? '') === expectedIssuer
+    ((extra.issuer as string) ?? '') === expectedIssuer &&
+    ((extra.destinationTag as number) ?? null) === (config.paymentDestinationTag ?? null)
   );
 }
 

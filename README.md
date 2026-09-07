@@ -209,12 +209,14 @@ For every submitted `X-PAYMENT` the server fetches the transaction from the
 XRPL JSON-RPC node (`XRPL_RPC_URL`) and requires ALL of:
 
 0. the payment terms echoed back in `X-PAYMENT` are the ones this server asked
-   for — `receiver`/`rewardDrops`/`network`/`asset`/`issuer` must equal the
+   for — `receiver`/`rewardDrops`/`network`/`asset`/`issuer`/`destinationTag`
+   must equal the
    configured values, so a payer cannot substitute its own receiver or amount
    (the nonce and expiry are still payer-supplied — see the gap note below)
 1. validated ledger entry only — `result.validated === true`
 2. `TransactionType === 'Payment'`
-3. `Destination ===` challenge receiver (`PAYMENT_RECEIVER`)
+3. `Destination ===` challenge receiver (`PAYMENT_RECEIVER`), and
+   `DestinationTag ===` the challenge's when `PAYMENT_DESTINATION_TAG` is set
 4. exact `Amount`: XRP drops string; RLUSD amount object with the configured
    issuer and exact value (`0.01` matches only `0.01`; `1.0` = `1`)
 5. network id matches the challenge (`XRPL_NETWORK` → `xrpl:1` = testnet, id 1)
@@ -234,6 +236,25 @@ status; only ledger data fetched by the server counts.
 > receiver, and each transaction hash is accepted only once — but pre-paying
 > and holding a payment is possible. Closing this needs a server-side store of
 > issued nonces (tracked with the usage-ledger roadmap item).
+
+### Receivers that require a destination tag
+
+Some accounts cannot take an untagged payment: with the `RequireDest` flag set,
+the ledger rejects one outright (`tecDST_TAG_NEEDED`), and a deposit address
+credits by tag. Check the receiver before going live:
+
+```bash
+curl -s -X POST "$XRPL_RPC_URL" -H 'Content-Type: application/json' \
+  -d '{"method":"account_info","params":[{"account":"'"$PAYMENT_RECEIVER"'","ledger_index":"validated","api_version":2}]}' \
+  | jq '.result.account_flags.requireDestinationTag'
+```
+
+If it is `true`, set `PAYMENT_DESTINATION_TAG`. The tag then travels the whole
+way — the 402 challenge carries `destinationTag`, `/v1/config` publishes it,
+the console shows payers what to send, and the verifier rejects a payment that
+arrives with the wrong tag or none (`wrong-destination-tag`). Without it a
+payer would follow the challenge, pay the network fee and still have the
+payment bounce.
 
 ## T54 hosted facilitator (optional, opt-in)
 
@@ -730,6 +751,7 @@ XRPL_NETWORK=xrpl:0                       # XRPL Mainnet
 PAYMENT_RECEIVER=r...                     # your mainnet receiving address
 PAYMENT_ASSET=XRP                         # or RLUSD (+ the MAINNET RLUSD_ISSUER)
 PAYMENT_REWARD_DROPS=1000000              # 1 XRP, in drops
+PAYMENT_DESTINATION_TAG=                  # only if the receiver has RequireDest set
 PAYMENT_FACILITATOR=quicknode             # or t54 — "mock" is refused
 XRPL_RPC_URL=https://<your-mainnet-node>  # quicknode path, https only
 T54_FACILITATOR_URL=https://xrpl-facilitator-mainnet.t54.ai   # t54 path only
@@ -815,6 +837,7 @@ or token, no facilitator or RPC URL. A test asserts this.
 | `XRPL_NETWORK` | `xrpl:1` | `xrpl:1` = testnet, `xrpl:0` = mainnet. On its own, `xrpl:0` puts the server in production mode |
 | `PAYMENT_RECEIVER` | *(empty)* | Address that collects payments (required for real verification) |
 | `PAYMENT_REWARD_DROPS` | `1000000` | Per-request amount: XRP drops when `PAYMENT_ASSET=XRP`, value (e.g. `0.01`) when `PAYMENT_ASSET=RLUSD` |
+| `PAYMENT_DESTINATION_TAG` | *(empty)* | XRPL `DestinationTag` every payment must carry. Empty = untagged payments are fine. Required when the receiving account has `RequireDest` set (it rejects untagged payments with `tecDST_TAG_NEEDED`) or credits deposits by tag: the challenge advertises it and the verifier requires it to match |
 | `PAYMENT_FACILITATOR` | `mock` | Which payment facilitator: `mock` (default — current zero-config behavior: in-process real verifier when `XRPL_RPC_URL` is set, else in-memory mock), `quicknode` (real on-ledger verification via `XRPL_RPC_URL`), or `t54` (hosted T54 facilitator via `T54_FACILITATOR_URL`) |
 | `T54_FACILITATOR_URL` | *(empty)* | Hosted T54 x402 facilitator base URL — required only when `PAYMENT_FACILITATOR=t54` (testnet `https://xrpl-facilitator-testnet.t54.ai`, mainnet `https://xrpl-facilitator-mainnet.t54.ai`) |
 | `XRPL_RPC_URL` | *(empty)* | XRPL JSON-RPC endpoint for REAL on-ledger verification (e.g. QuickNode, or testnet `https://s.altnet.rippletest.net:51234`). Used when `PAYMENT_FACILITATOR=quicknode`. Empty + `mock` = zero-config local dev |

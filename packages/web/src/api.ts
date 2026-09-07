@@ -61,6 +61,8 @@ export interface PublicConfig {
     asset: string;
     amount: string;
     receiver: string;
+    /** Present only when the operator requires a DestinationTag on payments. */
+    destinationTag?: number;
     issuer?: string;
     facilitator: string;
     /** False only for the mock facilitator, which verifies nothing on-ledger. */
@@ -182,6 +184,8 @@ export interface PaymentTerms {
   expiresAt: string;
   asset?: string;
   issuer?: string;
+  /** XRPL DestinationTag the payment must carry, when the gateway asks for one. */
+  destinationTag?: number;
 }
 
 export interface X402Challenge {

@@ -42,12 +42,24 @@ export interface PaymentRequest {
    * Optional for backwards compatibility: XRP payments do not need it.
    */
   issuer?: string;
+  /**
+   * XRPL DestinationTag the payer MUST put on the payment (PAYMENT_DESTINATION_TAG).
+   *
+   * Optional, and absent unless the operator configures one — but not
+   * cosmetic: an account with `RequireDest` set rejects every untagged
+   * payment on-ledger (tecDST_TAG_NEEDED), and an exchange deposit address
+   * credits by tag. Advertising it in the challenge is the only way a payer
+   * can know, and the verifier holds the payment to it.
+   */
+  destinationTag?: number;
 }
 
 export interface CreatePaymentRequestOptions {
   network: string;
   receiver: string;
   rewardDrops: string;
+  /** DestinationTag to advertise, when the receiver requires or expects one. */
+  destinationTag?: number;
 }
 
 export interface PaymentVerification {

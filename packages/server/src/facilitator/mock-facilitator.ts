@@ -40,6 +40,7 @@ export class MockFacilitator implements Facilitator {
       rewardDrops: options.rewardDrops,
       nonce: `${NONCE_PREFIX}${this.counter}-${now}`,
       expiresAt: new Date(now + 5 * 60 * 1000).toISOString(), // 5 minutes
+      destinationTag: options.destinationTag,
     };
   }
 

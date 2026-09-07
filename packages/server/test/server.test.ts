@@ -205,3 +205,93 @@ describe('POST /v1/chat — x402 payment gating', () => {
     expect(raw).toContain(TEST_CONFIG.paymentReceiver);
   });
 });
+// --- Destination tag ---------------------------------------------------------
+
+/**
+ * PAYMENT_DESTINATION_TAG exists for receivers that cannot take an untagged
+ * payment: an account with RequireDest set rejects one on the ledger, and a
+ * deposit address credits by tag. So the tag has to travel all the way to the
+ * payer — in the challenge and in /v1/config — and the payer must not be able
+ * to drop it on the way back.
+ */
+describe('destination tag', () => {
+  const taggedConfig = loadConfig({
+    paymentReceiver: 'rMOCKRECEIVERaddress00000000000000000',
+    network: 'xrpl:1',
+    rewardDrops: '1000000',
+    paymentDestinationTag: 42,
+    logLevel: 'error',
+  });
+
+  function taggedApp(): Express {
+    return createApp({ facilitator: new MockFacilitator(), config: taggedConfig });
+  }
+
+  it('advertises the tag in the 402 challenge', async () => {
+    const res = await request(taggedApp()).post('/v1/chat').send({ messages: [] }).expect(402);
+    expect(challengePayload(res).payment.destinationTag).toBe(42);
+  });
+
+  it('publishes the tag to the console, which has to show payers what to send', async () => {
+    const res = await request(taggedApp()).get('/v1/config').expect(200);
+    expect(res.body.payment.destinationTag).toBe(42);
+  });
+
+  it('refuses a payer who strips the tag out of the terms it echoes back', async () => {
+    const app = taggedApp();
+    const first = await request(app).post('/v1/chat').send({ messages: [] }).expect(402);
+    const challenge = challengePayload(first);
+    const { destinationTag, ...withoutTag } = challenge.payment;
+    expect(destinationTag).toBe(42);
+
+    const res = await request(app)
+      .post('/v1/chat')
+      .set(
+        X_PAYMENT_HEADER,
+        JSON.stringify({ nonce: challenge.token, signature: 's', payment: withoutTag })
+      )
+      .send({ messages: [] });
+    expect(res.status).toBe(402);
+  });
+
+  it('refuses a payer who rewrites the tag', async () => {
+    const app = taggedApp();
+    const first = await request(app).post('/v1/chat').send({ messages: [] }).expect(402);
+    const challenge = challengePayload(first);
+    const res = await request(app)
+      .post('/v1/chat')
+      .set(
+        X_PAYMENT_HEADER,
+        JSON.stringify({
+          nonce: challenge.token,
+          signature: 's',
+          payment: { ...challenge.payment, destinationTag: 7 },
+        })
+      )
+      .send({ messages: [] });
+    expect(res.status).toBe(402);
+  });
+
+  it('leaves an untagged gateway exactly as it was', async () => {
+    const res = await request(buildApp()).post('/v1/chat').send({ messages: [] }).expect(402);
+    expect(challengePayload(res).payment.destinationTag).toBeUndefined();
+    const config = await request(buildApp()).get('/v1/config').expect(200);
+    expect(config.body.payment.destinationTag).toBeUndefined();
+  });
+
+  it('refuses a tag that is not a uint32 instead of silently sending none', () => {
+    const saved = { ...process.env };
+    try {
+      for (const bad of ['abc', '-1', '1.5', '4294967296']) {
+        process.env.PAYMENT_DESTINATION_TAG = bad;
+        expect(() => loadConfig()).toThrow(/PAYMENT_DESTINATION_TAG/);
+      }
+      process.env.PAYMENT_DESTINATION_TAG = '0';
+      expect(loadConfig().paymentDestinationTag).toBe(0);
+      delete process.env.PAYMENT_DESTINATION_TAG;
+      expect(loadConfig().paymentDestinationTag).toBeUndefined();
+    } finally {
+      process.env = saved;
+    }
+  });
+});
