@@ -32,6 +32,12 @@ export function createApp(deps: AppDeps): Express {
     next();
   });
 
+  // Liveness probe for load balancers / serverless health checks.
+  // Unauthenticated by design; returns no secrets or config values.
+  app.get('/healthz', (_req: Request, res: Response) => {
+    res.status(200).json({ ok: true });
+  });
+
   // TODO(real-facilitator): exchange the mock for the t54 hosted XRPL
   // facilitator (XRPL_FACILITATOR_URL / XRPL_NETWORK from env). The
   // Facilitator interface is the seam; see createFacilitator() in index.ts.
