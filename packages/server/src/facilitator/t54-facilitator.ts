@@ -240,6 +240,7 @@ export class T54Facilitator implements Facilitator {
       expiresAt: new Date(this.now() + this.expiresInMs).toISOString(),
       asset: this.asset,
       issuer: this.asset === 'XRP' ? undefined : this.issuer,
+      destinationTag: options.destinationTag,
     };
     this.pending.set(request.nonce, { invoiceId });
     return request;

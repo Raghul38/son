@@ -44,6 +44,9 @@ export function publicConfig(config: ServerConfig, facilitatorName: string) {
       /** XRP drops, or the IOU value for an issued currency. */
       amount: config.rewardDrops,
       receiver: config.paymentReceiver,
+      ...(config.paymentDestinationTag !== undefined && {
+        destinationTag: config.paymentDestinationTag,
+      }),
       ...(config.paymentAsset !== 'XRP' && { issuer: config.rlusdIssuer }),
       facilitator: facilitatorName,
       /**

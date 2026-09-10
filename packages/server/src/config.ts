@@ -60,6 +60,15 @@ export interface ServerConfig {
    */
   rewardDrops: string;
   /**
+   * XRPL DestinationTag every payment must carry (PAYMENT_DESTINATION_TAG).
+   * Undefined (the default) means the receiver takes untagged payments.
+   *
+   * Set it when the receiving account has `RequireDest` enabled — it rejects
+   * untagged payments on-ledger — or when it is a deposit address that
+   * credits by tag. The challenge advertises it and the verifier requires it.
+   */
+  paymentDestinationTag?: number;
+  /**
    * Which payment facilitator to use (PAYMENT_FACILITATOR):
    *   - "mock"      -> MockFacilitator: zero-config local default, no network.
    *   - "quicknode" -> QuickNodeFacilitator: real on-ledger XRP/RLUSD
@@ -392,6 +401,25 @@ function parseBoolDefaultTrue(value: string | undefined): boolean {
   }
 }
 
+/**
+ * PAYMENT_DESTINATION_TAG -> an XRPL DestinationTag (uint32), or undefined.
+ *
+ * Throws on anything else: a tag the operator meant to set but mistyped would
+ * otherwise silently become "no tag", and every payment to a RequireDest
+ * account would fail on-ledger for a reason the payer cannot see.
+ */
+function parseDestinationTag(value: string | undefined): number | undefined {
+  if (value === undefined || value.trim() === '') return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 4294967295) {
+    throw new Error(
+      `Invalid PAYMENT_DESTINATION_TAG="${value}". Use an integer between 0 and 4294967295, ` +
+        'or leave it unset when the receiver takes untagged payments.'
+    );
+  }
+  return parsed;
+}
+
 /** Load configuration from process.env. Throws if a required var is missing. */
 export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
   const network = requireEnv('XRPL_NETWORK', XRPL_TESTNET);
@@ -403,6 +431,7 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     network,
     paymentReceiver: requireEnv('PAYMENT_RECEIVER', ''),
     rewardDrops: requireEnv('PAYMENT_REWARD_DROPS', '1000000'),
+    paymentDestinationTag: parseDestinationTag(env('PAYMENT_DESTINATION_TAG')),
     paymentFacilitator: parsePaymentFacilitator(env('PAYMENT_FACILITATOR')),
     t54FacilitatorUrl: env('T54_FACILITATOR_URL') ?? '',
     xrplRpcUrl: env('XRPL_RPC_URL') ?? '',

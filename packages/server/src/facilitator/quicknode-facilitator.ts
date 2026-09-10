@@ -42,7 +42,8 @@
  * VERIFICATION CHECKLIST (from the T54 xrpl-scheme spec) — ALL must pass:
  *   1. validated ledger entry only     — result.validated === true
  *   2. TransactionType === 'Payment'
- *   3. Destination === challenge receiver
+ *   3. Destination === challenge receiver (and DestinationTag === the
+ *      challenge's, when the operator advertised one)
  *   4. Amount matches the challenge exactly (XRP drops string; IOU value + issuer for RLUSD)
  *   5. network id matches the challenge (tx NetworkID === expected: xrpl:1 -> 1)
  *   6. nonce/invoice binding present and matching (MemoData or InvoiceID
@@ -105,6 +106,7 @@ interface LedgerTxJson {
   /** Sending address — attribution only, never part of the verdict. */
   Account?: unknown;
   Destination?: unknown;
+  DestinationTag?: unknown;
   Amount?: unknown;
   NetworkID?: unknown;
   Memos?: unknown;
@@ -209,6 +211,7 @@ export class QuickNodeFacilitator implements Facilitator {
       asset: this.asset,
       // Only advertise the issuer for issued currencies (RLUSD).
       issuer: this.asset === 'XRP' ? undefined : this.issuer,
+      destinationTag: options.destinationTag,
     };
   }
 
@@ -270,6 +273,15 @@ export class QuickNodeFacilitator implements Facilitator {
     // 3. Destination must equal the challenge receiver.
     if (typeof tx.Destination !== 'string' || tx.Destination !== paymentRequest.receiver) {
       return { valid: false, reason: 'wrong-destination' };
+    }
+    // 3b. DestinationTag, when the challenge advertised one. The receiving
+    //     account may have RequireDest set (untagged payments never land) or
+    //     credit deposits by tag, so a payment carrying the wrong tag — or
+    //     none — is not the payment this challenge asked for.
+    if (paymentRequest.destinationTag !== undefined) {
+      if (tx.DestinationTag !== paymentRequest.destinationTag) {
+        return { valid: false, reason: 'wrong-destination-tag' };
+      }
     }
     // 4. Amount must match exactly (insufficient or over-payment both reject).
     if (!this.amountMatches(tx.Amount, paymentRequest)) {
