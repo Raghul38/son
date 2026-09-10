@@ -9,7 +9,7 @@ Guidance for AI agents working in this repository.
 - Do NOT install `node_modules` or package caches under `/home` (only 300M). Set the npm cache to `/tmp/npm-cache`.
 
 ## Repo conventions
-- npm workspaces monorepo: `packages/router-core` (pure, deterministic router logic) and `packages/server` (Express + x402 middleware).
+- npm workspaces monorepo: `packages/router-core` (pure, deterministic router logic), `packages/server` (Express + x402 middleware), and `packages/sdk-ts` (TypeScript client SDK: x402 pay-and-retry chat client).
 - `router-core` must stay free of network/payment code — pure and unit-testable in isolation.
 - The server never signs for a payer — it only verifies/settles via a facilitator.
 - No hardcoded private keys or mainnet addresses anywhere; all URLs/addresses/network ids come from env vars.

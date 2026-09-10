@@ -7,7 +7,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @xrppay/router-core && npm run build -w @xrppay/server",
+    "build": "npm run build -w @xrppay/router-core && npm run build -w @xrppay/server && npm run build -w @xrppay/sdk-ts",
     "test": "npm run build && npm run test --workspaces --if-present"
   },
   "engines": {
