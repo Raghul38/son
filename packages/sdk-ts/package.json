@@ -1,0 +1,17 @@
+{
+  "name": "@xrppay/sdk-ts",
+  "version": "0.1.0",
+  "description": "TypeScript client SDK for the XRP-Pay Router: an x402 pay-and-retry chat client. Handles the 402 -> sign -> retry handshake; never holds private keys (signing is caller-provided).",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "jest --config jest.config.js"
+  },
+  "dependencies": {
+    "@xrppay/router-core": "0.1.0"
+  }
+}
